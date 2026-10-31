@@ -13,6 +13,8 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { validateDefinition } from "../src/definition/load.js";
+import { schedule } from "../src/engine/scheduler.js";
+import { initializeState, saveState, loadState } from "../src/engine/state.js";
 const root = path.resolve(".");
 const cli = path.join(root, "bin/aip.js");
 async function setup() {
@@ -41,7 +43,11 @@ test("review loop passes FAIL to revise and completes on PASS", async (t) => {
     await readFile(path.join(runs, "loop/state.json"), "utf8"),
   );
   assert.equal(s.status, "completed", s.error);
-  assert.equal(s.rounds.gate, 1);
+  assert.deepEqual(s.frontier, []);
+  assert.equal(s.steps.draft.attempts, 1);
+  assert.equal(s.steps.critic.attempts, 2);
+  assert.equal(s.steps.revise.attempts, 1);
+  assert.equal(s.rounds.gate, 2);
   assert.match(
     await readFile(
       path.join(runs, "loop/steps/revise/v1/a1/prompt.md"),
@@ -68,11 +74,15 @@ test("max rounds stops and rerun resets the loop", async (t) => {
   );
   assert.equal(s.status, "stopped: max-rounds");
   assert.equal(s.rounds.gate, 3);
+  assert.deepEqual(s.frontier, ["gate"]);
+  assert.equal(s.steps.gate.attempts, 3);
   await writeFile(path.join(fixture, "critic.md"), "VERDICT: PASS\nReady.\n");
   run(["rerun", "--run-id", "loop", "--from", "revise", ...opts(runs)]);
   s = JSON.parse(await readFile(path.join(runs, "loop/state.json"), "utf8"));
   assert.equal(s.status, "completed", s.error);
-  assert.equal(s.rounds.gate, 0);
+  assert.equal(s.rounds.gate, 1);
+  assert.equal(s.steps.gate.attempts, 4);
+  assert.equal(s.steps.revise.attempts, 4);
   assert.ok(
     await readFile(
       path.join(runs, "loop/steps/revise/v1/a1/output.md"),
@@ -90,7 +100,7 @@ test("failed command resumes after definition repair", async (t) => {
   const d = {
     id: "retry",
     inputs: { source: "input.md" },
-    steps: [{
+    steps: [command("initial", ["command"]), {
       id: "command",
       kind: "exec",
       argv: ["node", "-e", "process.exit(1)"],
@@ -105,7 +115,9 @@ test("failed command resumes after definition repair", async (t) => {
     await readFile(path.join(runs, "retry/state.json"), "utf8"),
   );
   assert.equal(s.status, "failed");
-  d.steps[0].argv = [
+  assert.deepEqual(s.frontier, ["command"]);
+  assert.equal(s.steps.initial.attempts, 1);
+  d.steps[1].argv = [
     "node",
     "-e",
     'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.env.AIP_MANIFEST));fs.writeFileSync(m.outputs.result,"ok")',
@@ -268,12 +280,14 @@ test("ready commands run concurrently within the configured limit", async (t) =>
       id: "parallel",
       inputs: {},
       steps: [
+        { id: "start", kind: "exec", argv: ["node", "-e", ""], outputs: [], next: ["left", "right"] },
         {
           id: "left",
           kind: "exec",
           argv: ["node", "left.js"],
           inputs: [],
           outputs: ["left-result"],
+          next: ["left2"],
         },
         {
           id: "right",
@@ -281,7 +295,11 @@ test("ready commands run concurrently within the configured limit", async (t) =>
           argv: ["node", "right.js"],
           inputs: [],
           outputs: ["right-result"],
+          next: ["right2"],
         },
+        { id: "left2", kind: "exec", argv: ["node", "-e", ""], outputs: [], next: ["join"] },
+        { id: "right2", kind: "exec", argv: ["node", "-e", ""], outputs: [], next: ["join"] },
+        { id: "join", kind: "exec", argv: ["node", "-e", ""], outputs: [], waitFor: ["left2", "right2"], next: [] },
       ],
     }),
   );
@@ -290,4 +308,93 @@ test("ready commands run concurrently within the configured limit", async (t) =>
     await readFile(path.join(runs, "parallel/state.json"), "utf8"),
   );
   assert.equal(s.status, "completed");
+});
+
+async function engineRun(t, steps, gateway = async () => "VERDICT: PASS", inputs = {}) {
+  const temp = await setup();
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  await writeFile(path.join(temp, "role.md"), "Respond.");
+  const definition = { id: "flow", inputs, steps };
+  const inputFiles = {};
+  for (const [id, file] of Object.entries(inputs)) {
+    inputFiles[id] = path.join(temp, file);
+    await writeFile(inputFiles[id], "Initial value.");
+  }
+  validateDefinition(definition);
+  const state = await initializeState(temp, definition, "", inputFiles);
+  await schedule({ definition, definitionDir: temp, runDir: temp, state, gateway });
+  return { temp, state, definition, gateway };
+}
+const command = (id, next, waitFor = []) => ({ id, kind: "exec", argv: ["node", "-e", ""], outputs: [], next, waitFor });
+const textStep = (id, inputs, output, next) => ({ id, kind: "llm", role: "role.md", route: "local", inputs, output, next });
+test("two decisions do not reactivate an unselected dependency path", async (t) => {
+  const { state } = await engineRun(t, [
+    textStep("a", ["repair-value"], "a-value", ["g1"]),
+    { id: "g1", kind: "decide", source: "a-value", max: 2, cases: [{when: ["PASS"], goto: "b"}, {when: ["FAIL"], goto: "repair"}] },
+    textStep("repair", ["b-value"], "repair-value", ["a"]),
+    textStep("b", [], "b-value", ["g2"]),
+    { id: "g2", kind: "decide", source: "b-value", max: 2, cases: [{when: ["FAIL"], goto: "repair"}, {when: ["PASS"], goto: "end"}] },
+    command("end", []),
+  ], undefined, { "repair-value": "seed.md" });
+  assert.equal(state.status, "completed", state.error);
+  assert.equal(state.steps.a.attempts, 1);
+  assert.equal(state.steps.repair.attempts, 0);
+  assert.equal(state.rounds.g1, 1);
+});
+test("unmatched decision fails with reason; first matching case wins over default", async (t) => {
+  const steps = [textStep("source", [], "value", ["gate"]),
+    { id: "gate", kind: "decide", source: "value", max: 1, cases: [{ when: ["OTHER"], goto: "end" }] }, command("end", [])];
+  const result = await engineRun(t, steps);
+  assert.equal(result.state.status, "failed");
+  assert.match(result.state.error, /no matching case/);
+  assert.deepEqual(result.state.frontier, ["gate"]);
+  steps[1].default = "end";
+  const fallback = await engineRun(t, steps);
+  assert.equal(fallback.state.status, "completed");
+  steps[1].cases = [{when: ["PASS"], goto: "end"}, {when: ["PASS"], goto: "source"}];
+  steps[1].default = "source";
+  steps[1].next = ["source"];
+  const matched = await engineRun(t, steps);
+  assert.equal(matched.state.status, "completed");
+  assert.equal(matched.state.steps.source.attempts, 1);
+});
+test("waitFor requires fresh completions on every activation and survives continue", async (t) => {
+  const result = await engineRun(t, [command("start", ["a", "b"]),
+    command("a", ["join"]), command("b", ["join"]),
+    command("join", ["again"], ["a", "b"]), command("again", ["a"])]);
+  const { state, definition, temp, gateway } = result;
+  assert.equal(state.status, "waiting-input");
+  assert.deepEqual(state.frontier, ["join"]);
+  assert.equal(state.steps.join.attempts, 1);
+  assert.equal(state.steps.a.attempts, 2);
+  assert.equal(state.steps.b.attempts, 1);
+  definition.steps.find(step => step.id === "join").next = [];
+  state.frontier.push("b");
+  await saveState(temp, state);
+  const restored = await loadState(temp);
+  await schedule({ definition, definitionDir: temp, runDir: temp, state: restored, gateway, parallel: 1 });
+  assert.equal(restored.status, "completed");
+  assert.equal(restored.steps.join.attempts, 2);
+});
+
+test("activation during execution schedules another version", async (t) => {
+  const slow = textStep("slow", [], "result", []);
+  const { state } = await engineRun(t, [command("start", ["fast", "slow"]),
+    textStep("fast", [], "signal", ["slow"]), slow], async ({step}) => {
+    if (step.id === "slow") await new Promise(resolve => setTimeout(resolve, 40));
+    return "ok";
+  });
+  assert.equal(state.status, "completed", state.error);
+  assert.equal(state.steps.slow.attempts, 2);
+});
+
+test("definition validates transition and join references", () => {
+  for (const key of ["next", "waitFor"]) {
+    for (const value of ["end", ["missing"], [42]]) {
+      assert.throws(() => validateDefinition({ id: "x", inputs: {},
+        steps: [{ ...command("start", []), [key]: value }] }), /invalid/);
+    }
+  }
+  assert.throws(() => validateDefinition({ id: "x", inputs: { value: "value.md" },
+    steps: [{ id: "gate", kind: "decide", source: "value", max: 1, cases: [], default: "missing" }] }), /unknown default/);
 });

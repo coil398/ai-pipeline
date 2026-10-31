@@ -12,7 +12,10 @@
         "brief"
       ],
       "output": "draft",
-      "route": "fast"
+      "route": "fast",
+      "next": [
+        "critic"
+      ]
     },
     {
       "id": "critic",
@@ -22,7 +25,10 @@
         "draft"
       ],
       "output": "critique",
-      "route": "quality"
+      "route": "quality",
+      "next": [
+        "gate"
+      ]
     },
     {
       "id": "gate",
@@ -53,7 +59,10 @@
         "critique"
       ],
       "output": "draft",
-      "route": "fast"
+      "route": "fast",
+      "next": [
+        "critic"
+      ]
     },
     {
       "id": "done",
@@ -67,7 +76,8 @@
       ],
       "outputs": [
         "receipt"
-      ]
+      ],
+      "next": []
     }
   ]
 }

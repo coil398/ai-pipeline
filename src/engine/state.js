@@ -4,9 +4,13 @@ import { atomicJson, readJson } from "../io/files.js";
 export function statePath(runDir) {
   return path.join(runDir, "state.json");
 }
+const saves = new WeakMap();
 export async function saveState(runDir, state) {
   state.updatedAt = new Date().toISOString();
-  await atomicJson(statePath(runDir), state);
+  const snapshot = structuredClone(state);
+  const pending = (saves.get(state) ?? Promise.resolve()).then(() => atomicJson(statePath(runDir), snapshot));
+  saves.set(state, pending);
+  await pending;
 }
 export async function loadState(runDir) {
   return readJson(statePath(runDir));
@@ -26,6 +30,8 @@ export async function initializeState(
     workflow: definition.id,
     definitionFile,
     status: "running",
+    frontier: definition.steps.length ? [definition.steps[0].id] : [],
+    sequence: 0,
     steps: Object.fromEntries(
       definition.steps.map(
         (step) => [step.id, { status: "pending", attempts: 0 }],

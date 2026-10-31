@@ -14,7 +14,10 @@
         "style"
       ],
       "output": "design-plan",
-      "route": "planning"
+      "route": "planning",
+      "next": [
+        "plan-review"
+      ]
     },
     {
       "id": "plan-review",
@@ -24,7 +27,10 @@
         "design-plan"
       ],
       "output": "plan-verdict",
-      "route": "review"
+      "route": "review",
+      "next": [
+        "plan-gate"
+      ]
     },
     {
       "id": "plan-gate",
@@ -55,7 +61,10 @@
         "plan-verdict"
       ],
       "output": "design-plan",
-      "route": "planning"
+      "route": "planning",
+      "next": [
+        "plan-review"
+      ]
     },
     {
       "id": "implement",
@@ -65,7 +74,10 @@
         "design-plan"
       ],
       "output": "implementation",
-      "route": "coding-agent"
+      "route": "coding-agent",
+      "next": [
+        "screenshot"
+      ]
     },
     {
       "id": "screenshot",
@@ -79,6 +91,9 @@
       ],
       "outputs": [
         "screenshots"
+      ],
+      "next": [
+        "visual-review"
       ]
     },
     {
@@ -90,7 +105,10 @@
         "style"
       ],
       "output": "visual-verdict",
-      "route": "review"
+      "route": "review",
+      "next": [
+        "visual-gate"
+      ]
     },
     {
       "id": "visual-gate",
@@ -120,7 +138,10 @@
         "implementation"
       ],
       "output": "reader-verdict",
-      "route": "review"
+      "route": "review",
+      "next": [
+        "reader-gate"
+      ]
     },
     {
       "id": "reader-gate",
@@ -154,6 +175,10 @@
       ],
       "outputs": [
         "receipt"
+      ],
+      "next": [],
+      "waitFor": [
+        "reader-check"
       ]
     }
   ]

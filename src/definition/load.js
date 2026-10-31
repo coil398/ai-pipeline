@@ -1,7 +1,7 @@
 import path from "node:path";
 import { exists, readJson } from "../io/files.js";
 
-/** @typedef {{ id: string, kind: 'llm'|'exec'|'decide', inputs?: string[], role?: string, route?: string, output?: string, outputs?: string[], argv?: string[], source?: string, field?: string, cases?: Array<{when: string[], goto: string}>, max?: number }} WorkflowStep */
+/** @typedef {{ id: string, kind: 'llm'|'exec'|'decide', inputs?: string[], role?: string, route?: string, output?: string, outputs?: string[], argv?: string[], source?: string, field?: string, cases?: Array<{when: string[], goto: string}>, max?: number, next?: string[], waitFor?: string[], default?: string }} WorkflowStep */
 /** @typedef {{ id: string, inputs: Record<string, string>, steps: WorkflowStep[] }} Workflow */
 
 /** @param {string} file @returns {Promise<{definition: Workflow, file: string, directory: string}>} */
@@ -104,6 +104,15 @@ export function validateDefinition(definition) {
     }
   }
   for (const step of definition.steps) {
+    for (const key of ["next", "waitFor"]) {
+      if (step[key] !== undefined && (!Array.isArray(step[key]) ||
+        step[key].some((id) => typeof id !== "string" || !ids.has(id)))) {
+        throw new Error(`invalid ${key} target in ${step.id}`);
+      }
+    }
+    if (step.kind === "decide" && step.default !== undefined && !ids.has(step.default)) {
+      throw new Error(`unknown default target in ${step.id}`);
+    }
     if (step.kind === "decide") {
       for (const item of step.cases) {
         if (!ids.has(item.goto)) {

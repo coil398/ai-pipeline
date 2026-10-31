@@ -6,7 +6,7 @@ import { renderPrompt, runLlm } from "../steps/llm.js";
 import { runExec } from "../steps/exec.js";
 import { chooseCase } from "../steps/decide.js";
 import { saveState } from "./state.js";
-import { dependentSteps } from "./graph.js";
+import { log } from "../io/log.js";
 
 const process = /** @type {any} */ (globalThis).process;
 const attemptDir = (runDir, step, version) =>
@@ -16,118 +16,85 @@ const attemptDir = (runDir, step, version) =>
 export async function schedule(
   { definition, definitionDir, runDir, state, gateway, parallel = 4 },
 ) {
-  const controlled = new Map();
-  for (const step of definition.steps) {
-    if (step.kind === "decide") {
-      for (const item of step.cases) controlled.set(item.goto, false);
-    }
-  }
-  let priorityStep = null;
   try {
     state.status = "running";
+    delete state.error;
     await saveState(runDir, state);
     for (;;) {
-      const ordered = priorityStep
-        ? [
-          definition.steps.find((item) => item.id === priorityStep),
-          ...definition.steps.filter((item) => item.id !== priorityStep),
-        ]
-        : definition.steps;
-      priorityStep = null;
-      const candidates = [];
-      for (const step of ordered) {
-        if (state.steps[step.id].status === "completed") continue;
-        if (controlled.has(step.id) && !controlled.get(step.id)) continue;
-        if (!(await allInputsExist(step, state))) continue;
-        if (step.kind === "decide") {
-          if (!candidates.length) candidates.push(step);
-          break;
-        }
-        candidates.push(step);
+      if (!state.frontier.length) {
+        state.status = "completed";
+        break;
       }
-      if (!candidates.length) break;
       const batch = [];
       const claimedOutputs = new Set();
-      for (const step of candidates) {
-        if (step.kind === "decide" && batch.length) break;
-        const outputs = [
-          ...(step.output ? [step.output] : []),
-          ...(step.outputs ?? []),
-        ];
+      for (const id of state.frontier) {
+        const step = definition.steps.find((item) => item.id === id);
+        const record = state.steps[id];
+        if (!(await allInputsExist(step, state))) continue;
+        if (!(step.waitFor ?? []).every((source) =>
+          (state.steps[source].completedSequence ?? 0) > (record.completedSequence ?? 0)
+        )) continue;
+        if (step.kind === "decide") {
+          if (!batch.length) batch.push(step);
+          break;
+        }
+        const outputs = step.outputs ?? [step.output];
         if (outputs.some((output) => claimedOutputs.has(output))) continue;
-        const inputs = [
-          ...(step.inputs ?? []),
-          ...(step.kind === "decide" ? [step.source] : []),
-        ];
-        const stepPosition = candidates.indexOf(step);
-        const blockedByBatch = inputs.some((input) =>
-          candidates.some((producer, position) =>
-            position < stepPosition && producer.id !== step.id &&
-            state.steps[producer.id].status !== "completed" &&
-            [
-              ...(producer.output ? [producer.output] : []),
-              ...(producer.outputs ?? []),
-            ].includes(input)
-          )
-        );
-        if (blockedByBatch) continue;
         batch.push(step);
         for (const output of outputs) claimedOutputs.add(output);
-        if (batch.length >= parallel || step.kind === "decide") break;
+        if (batch.length >= parallel) break;
       }
-      if (!batch.length) break;
-      const outcomes = await Promise.allSettled(
-        batch.map((step) =>
-          execute({ step, definition, definitionDir, runDir, state, gateway })
-        ),
-      );
-      const failed = outcomes.find((outcome) => outcome.status === "rejected");
-      if (failed?.status === "rejected") throw failed.reason;
+      if (!batch.length) {
+        state.status = "waiting-input";
+        break;
+      }
       const decision = batch.find((step) => step.kind === "decide");
-      if (decision) {
-        const selected = state.steps[decision.id].selected;
-        for (const item of decision.cases) {
-          controlled.set(item.goto, item.goto === selected);
-          if (item.goto !== selected) state.steps[item.goto].status = "skipped";
-          if (
-            item.goto === selected &&
-            state.steps[item.goto].status === "skipped"
-          ) state.steps[item.goto].status = "pending";
-        }
-        const body = dependentSteps(definition, selected);
-        const sourceProducer = definition.steps.find((item) =>
-          item.output === decision.source ||
-          item.outputs?.includes(decision.source)
-        );
-        const isBackward = sourceProducer && body.has(sourceProducer.id);
-        if (isBackward) {
-          priorityStep = selected;
-          const count = state.rounds[decision.id];
-          if (count >= decision.max) {
-            state.status = "stopped: max-rounds";
-            await saveState(runDir, state);
-            return state;
-          }
-          state.rounds[decision.id] = count + 1;
-          for (const id of body) {
-            if (state.steps[id]) state.steps[id].status = "pending";
-          }
-        }
+      if (decision && state.rounds[decision.id] >= decision.max) {
+        state.status = "stopped: max-rounds";
+        break;
       }
+      const active = new Set(batch.map((step) => step.id));
+      const reactivated = new Set();
+      const outcomes = await Promise.allSettled(batch.map(async (step) => {
+        if (step.kind === "decide") state.rounds[step.id]++;
+        const record = state.steps[step.id];
+        const started = Date.now();
+        log("INFO", "step_start", { run_id: state.runId, step_id: step.id, version: record.attempts + 1 });
+        try {
+          await execute({ step, definition, definitionDir, runDir, state, gateway });
+          record.status = "completed";
+          record.completedAt = new Date().toISOString();
+          record.completedSequence = ++state.sequence;
+          active.delete(step.id);
+          if (!reactivated.has(step.id)) {
+            state.frontier = state.frontier.filter((id) => id !== step.id);
+          }
+          const index = definition.steps.indexOf(step);
+          const next = step.kind === "decide" ? [record.selected]
+            : step.next ?? (definition.steps[index + 1] ? [definition.steps[index + 1].id] : []);
+          for (const id of next) {
+            if (active.has(id)) reactivated.add(id);
+            if (!state.frontier.includes(id)) state.frontier.push(id);
+          }
+          log("INFO", "step_done", { run_id: state.runId, step_id: step.id, next: next.join(","), elapsed_ms: Date.now() - started });
+          await saveState(runDir, state);
+        } catch (error) {
+          log("ERROR", "step_failed", { run_id: state.runId, step_id: step.id, elapsed_ms: Date.now() - started, reason: error.message });
+          record.status = error.message === "waiting-human" ? "waiting-human" : "failed";
+          await saveState(runDir, state);
+          throw error;
+        }
+      }));
+      const rejected = outcomes.filter((outcome) => outcome.status === "rejected");
+      const failed = rejected.find((outcome) => outcome.reason.message !== "waiting-human") ?? rejected[0];
+      if (failed) throw failed.reason;
     }
-    state.status = Object.values(state.steps).every((item) =>
-        item.status === "completed" || item.status === "skipped"
-      )
-      ? "completed"
-      : "waiting-input";
     await saveState(runDir, state);
     return state;
   } catch (error) {
     state.status = error.message === "waiting-human"
       ? "waiting-human"
-      : error.message.startsWith("stopped:")
-      ? error.message
-      : "failed";
+      : error.message.startsWith("stopped:") ? error.message : "failed";
     state.error = error.stack ?? error.message;
     await saveState(runDir, state);
     return state;
@@ -242,13 +209,10 @@ async function execute(
     }
   } else {
     const source = await readText(state.artifacts[step.source].path);
-    const selected = chooseCase(step, source);
-    if (!selected) throw new Error(`no matching case in ${step.id}`);
-    record.selected = selected.goto;
+    const selected = chooseCase(step, source)?.goto ?? step.default;
+    if (!selected) throw new Error(`no matching case in ${step.id} and no default`);
+    record.selected = selected;
   }
-  record.status = "completed";
-  record.completedAt = new Date().toISOString();
-  await saveState(runDir, state);
 }
 async function previousArtifactPaths(runDir, id, definition) {
   const producers = definition.steps.filter((step) =>

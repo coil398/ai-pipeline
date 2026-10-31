@@ -4,7 +4,6 @@ import { mkdir } from "node:fs/promises";
 import { loadDefinition } from "../src/definition/load.js";
 import { initializeState, loadState, saveState } from "../src/engine/state.js";
 import { schedule } from "../src/engine/scheduler.js";
-import { dependentSteps } from "../src/engine/graph.js";
 import { acquireLease } from "../src/engine/lease.js";
 import { fixtureGateway } from "../src/llm/gateways/fixture.js";
 import { humanGateway } from "../src/llm/gateways/human.js";
@@ -73,20 +72,10 @@ async function main() {
       step.id === start
     );
     if (!start || startIndex < 0) throw new Error(`unknown step: ${start}`);
-    const affected = dependentSteps(loaded.definition, start);
     return withLease(runDir, async () => {
       const state = await loadState(runDir);
-      for (
-        const decide of loaded.definition.steps.filter((step) =>
-          step.kind === "decide"
-        )
-      ) if (affected.has(decide.id)) state.rounds[decide.id] = 0;
-      for (const id of affected) {
-        state.steps[id] = {
-          status: "pending",
-          attempts: state.steps[id].attempts,
-        };
-      }
+      state.frontier = [start];
+      for (const id of Object.keys(state.rounds)) state.rounds[id] = 0;
       state.status = "running";
       delete state.error;
       await saveState(runDir, state);
