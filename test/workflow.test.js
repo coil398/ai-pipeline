@@ -122,10 +122,24 @@ test("failed command resumes after definition repair", async (t) => {
     "-e",
     'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.env.AIP_MANIFEST));fs.writeFileSync(m.outputs.result,"ok")',
   ];
+  d.steps[1].next = ["added"];
+  d.steps.push({
+    id: "added",
+    kind: "exec",
+    argv: ["node", "-e", 'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.env.AIP_MANIFEST));fs.writeFileSync(m.outputs.added,"added")'],
+    inputs: ["result"],
+    outputs: ["added"],
+  });
   await writeFile(wf, JSON.stringify(d));
   run(["continue", "--run-id", "retry", ...opts(runs)]);
   s = JSON.parse(await readFile(path.join(runs, "retry/state.json"), "utf8"));
   assert.equal(s.status, "completed");
+  assert.equal(s.steps.added.attempts, 1);
+  assert.deepEqual(s.rounds, {});
+  run(["rerun", "--run-id", "retry", "--from", "added", ...opts(runs)]);
+  s = JSON.parse(await readFile(path.join(runs, "retry/state.json"), "utf8"));
+  assert.equal(s.status, "completed", s.error);
+  assert.equal(s.steps.added.attempts, 2);
 });
 test("definition rejects unresolved inputs and unknown goto", () => {
   assert.throws(

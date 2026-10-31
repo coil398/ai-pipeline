@@ -12,8 +12,14 @@ export async function saveState(runDir, state) {
   saves.set(state, pending);
   await pending;
 }
-export async function loadState(runDir) {
+export async function loadState(runDir, definition) {
   const state = await readJson(statePath(runDir));
+  if (definition) {
+    for (const step of definition.steps) {
+      state.steps[step.id] ??= { status: "pending", attempts: 0 };
+      if (step.kind === "decide") state.rounds[step.id] ??= {};
+    }
+  }
   for (const [id, counts] of Object.entries(state.rounds)) {
     if (typeof counts === "number") state.rounds[id] = {};
   }

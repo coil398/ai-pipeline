@@ -100,7 +100,7 @@ async function main() {
     );
     if (!start || startIndex < 0) throw new Error(`unknown step: ${start}`);
     return withLease(runDir, async () => {
-      const state = await loadState(runDir);
+      const state = await loadState(runDir, loaded.definition);
       state.frontier = [start];
       for (const id of Object.keys(state.rounds)) state.rounds[id] = {};
       state.status = "running";
@@ -111,7 +111,7 @@ async function main() {
   }
   if (command !== "continue") return usage();
   return withLease(runDir, async () => {
-    const state = await loadState(runDir);
+    const state = await loadState(runDir, loaded.definition);
     await runLoaded(loaded, runDir, state, parallel);
   });
 }
