@@ -36,6 +36,8 @@ export async function openaiChat(gateway, request) {
           model: request.model,
           messages: [{ role: "user", content: request.prompt }],
           ...(request.effort ? { reasoning_effort: request.effort } : {}),
+          stream: true,
+          stream_options: { include_usage: true },
         }),
         signal: controller.signal,
       },
@@ -56,10 +58,13 @@ export async function openaiChat(gateway, request) {
         `HTTP ${response.status}${safeResponseText ? `: ${safeResponseText}` : ""}`,
       );
     }
-    const body = await response.json();
+    const contentType = response.headers?.get("content-type") ?? "";
+    const body = contentType.includes("text/event-stream")
+      ? await readEventStream(response.body)
+      : await response.json();
     const usage = body.usage ?? {};
     return {
-      text: body.choices?.[0]?.message?.content ?? "",
+      text: body.text ?? body.choices?.[0]?.message?.content ?? "",
       usage: {
         inputTokens: usage.prompt_tokens ?? 0,
         outputTokens: usage.completion_tokens ?? 0,
@@ -69,6 +74,40 @@ export async function openaiChat(gateway, request) {
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+async function readEventStream(stream) {
+  let text = "";
+  let usage = {};
+  let buffer = "";
+  const decoder = new TextDecoder();
+  for await (const chunk of stream) {
+    buffer += typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
+    let newline;
+    while ((newline = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, newline).replace(/\r$/, "");
+      buffer = buffer.slice(newline + 1);
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (data === "[DONE]") return { text, usage };
+      if (!data) continue;
+      const event = JSON.parse(data);
+      const content = event.choices?.[0]?.delta?.content;
+      if (typeof content === "string") text += content;
+      if (event.usage) usage = event.usage;
+    }
+  }
+  buffer += decoder.decode();
+  const line = buffer.replace(/\r$/, "");
+  if (line.startsWith("data:")) {
+    const data = line.slice(5).trim();
+    if (data && data !== "[DONE]") {
+      const event = JSON.parse(data);
+      const content = event.choices?.[0]?.delta?.content;
+      if (typeof content === "string") text += content;
+      if (event.usage) usage = event.usage;
+    }
+  }
+  return { text, usage };
 }
 async function readEnvValue(file, name) {
   const contents = await readFile(file, "utf8");

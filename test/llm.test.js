@@ -9,6 +9,67 @@ import { spawn } from "node:child_process";
 const root = path.resolve(".");
 const cli = path.join(root, "bin/aip.js");
 const tempRoot = () => mkdtemp(path.join(os.tmpdir(), "aip-llm-"));
+test("openai chat assembles split SSE content and usage, stopping at DONE", async () => {
+  const { openaiChat } = await import("../src/llm/gateways/openai-chat.js");
+  const priorFetch = globalThis.fetch;
+  let requestBody;
+  let consumedAfterDone = false;
+  globalThis.fetch = async (_url, options) => {
+    requestBody = JSON.parse(options.body);
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => "text/event-stream" },
+      body: (async function* () {
+        yield new TextEncoder().encode('data: {"choices":[{"delta":{"content":"Hel');
+        yield new TextEncoder().encode('lo"}}]}\n\ndata: {"choices":[{"delta":{"reasoning_content":"hidden"}}]}\n');
+        yield new TextEncoder().encode('data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}\n');
+        yield new TextEncoder().encode('data: [DONE]\n');
+        consumedAfterDone = true;
+        yield new TextEncoder().encode('data: {"choices":[{"delta":{"content":"!"}}]}\n');
+      })(),
+    };
+  };
+  try {
+    const result = await openaiChat(
+      { baseUrl: "http://example.invalid" },
+      { model: "m", prompt: "p" },
+    );
+    assert.equal(requestBody.stream, true);
+    assert.deepEqual(requestBody.stream_options, { include_usage: true });
+    assert.deepEqual(result, {
+      text: "Hello",
+      usage: { inputTokens: 7, outputTokens: 2, totalTokens: 9 },
+    });
+    assert.equal(consumedAfterDone, false);
+  } finally {
+    globalThis.fetch = priorFetch;
+  }
+});
+test("openai chat continues to read JSON responses", async () => {
+  const { openaiChat } = await import("../src/llm/gateways/openai-chat.js");
+  const priorFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => "application/json" },
+    json: async () => ({
+      choices: [{ message: { content: "json result" } }],
+      usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 },
+    }),
+  });
+  try {
+    assert.deepEqual(await openaiChat(
+      { baseUrl: "http://example.invalid" },
+      { model: "m", prompt: "p" },
+    ), {
+      text: "json result",
+      usage: { inputTokens: 3, outputTokens: 4, totalTokens: 7 },
+    });
+  } finally {
+    globalThis.fetch = priorFetch;
+  }
+});
 test("openai chat applies configured headers with a fresh requestId per request", async () => {
   const { openaiChat } = await import("../src/llm/gateways/openai-chat.js");
   const priorFetch = globalThis.fetch;
