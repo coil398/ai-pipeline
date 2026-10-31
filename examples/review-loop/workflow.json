@@ -1,0 +1,73 @@
+{
+  "id": "review-loop",
+  "inputs": {
+    "brief": "inputs/brief.md"
+  },
+  "steps": [
+    {
+      "id": "draft",
+      "kind": "llm",
+      "role": "roles/writer.md",
+      "inputs": [
+        "brief"
+      ],
+      "output": "draft",
+      "route": "fast"
+    },
+    {
+      "id": "critic",
+      "kind": "llm",
+      "role": "roles/reviewer.md",
+      "inputs": [
+        "draft"
+      ],
+      "output": "critique",
+      "route": "quality"
+    },
+    {
+      "id": "gate",
+      "kind": "decide",
+      "source": "critique",
+      "max": 3,
+      "cases": [
+        {
+          "when": [
+            "PASS"
+          ],
+          "goto": "done"
+        },
+        {
+          "when": [
+            "FAIL"
+          ],
+          "goto": "revise"
+        }
+      ]
+    },
+    {
+      "id": "revise",
+      "kind": "llm",
+      "role": "roles/reviser.md",
+      "inputs": [
+        "draft",
+        "critique"
+      ],
+      "output": "draft",
+      "route": "fast"
+    },
+    {
+      "id": "done",
+      "kind": "exec",
+      "argv": [
+        "node",
+        "scripts/finish.js"
+      ],
+      "inputs": [
+        "draft"
+      ],
+      "outputs": [
+        "receipt"
+      ]
+    }
+  ]
+}

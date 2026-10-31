@@ -1,0 +1,160 @@
+{
+  "id": "design-change",
+  "inputs": {
+    "request": "inputs/request.md",
+    "style": "inputs/style.md"
+  },
+  "steps": [
+    {
+      "id": "plan",
+      "kind": "llm",
+      "role": "roles/planner.md",
+      "inputs": [
+        "request",
+        "style"
+      ],
+      "output": "design-plan",
+      "route": "planning"
+    },
+    {
+      "id": "plan-review",
+      "kind": "llm",
+      "role": "roles/plan-reviewer.md",
+      "inputs": [
+        "design-plan"
+      ],
+      "output": "plan-verdict",
+      "route": "review"
+    },
+    {
+      "id": "plan-gate",
+      "kind": "decide",
+      "source": "plan-verdict",
+      "max": 3,
+      "cases": [
+        {
+          "when": [
+            "PASS"
+          ],
+          "goto": "implement"
+        },
+        {
+          "when": [
+            "FAIL"
+          ],
+          "goto": "plan-revise"
+        }
+      ]
+    },
+    {
+      "id": "plan-revise",
+      "kind": "llm",
+      "role": "roles/planner.md",
+      "inputs": [
+        "design-plan",
+        "plan-verdict"
+      ],
+      "output": "design-plan",
+      "route": "planning"
+    },
+    {
+      "id": "implement",
+      "kind": "llm",
+      "role": "roles/implementer.md",
+      "inputs": [
+        "design-plan"
+      ],
+      "output": "implementation",
+      "route": "coding-agent"
+    },
+    {
+      "id": "screenshot",
+      "kind": "exec",
+      "argv": [
+        "node",
+        "scripts/capture.js"
+      ],
+      "inputs": [
+        "implementation"
+      ],
+      "outputs": [
+        "screenshots"
+      ]
+    },
+    {
+      "id": "visual-review",
+      "kind": "llm",
+      "role": "roles/visual-reviewer.md",
+      "inputs": [
+        "screenshots",
+        "style"
+      ],
+      "output": "visual-verdict",
+      "route": "review"
+    },
+    {
+      "id": "visual-gate",
+      "kind": "decide",
+      "source": "visual-verdict",
+      "max": 3,
+      "cases": [
+        {
+          "when": [
+            "PASS"
+          ],
+          "goto": "reader-check"
+        },
+        {
+          "when": [
+            "FAIL"
+          ],
+          "goto": "implement"
+        }
+      ]
+    },
+    {
+      "id": "reader-check",
+      "kind": "llm",
+      "role": "roles/reader.md",
+      "inputs": [
+        "implementation"
+      ],
+      "output": "reader-verdict",
+      "route": "review"
+    },
+    {
+      "id": "reader-gate",
+      "kind": "decide",
+      "source": "reader-verdict",
+      "max": 3,
+      "cases": [
+        {
+          "when": [
+            "PASS"
+          ],
+          "goto": "done"
+        },
+        {
+          "when": [
+            "FAIL"
+          ],
+          "goto": "implement"
+        }
+      ]
+    },
+    {
+      "id": "done",
+      "kind": "exec",
+      "argv": [
+        "node",
+        "scripts/finish.js"
+      ],
+      "inputs": [
+        "implementation"
+      ],
+      "outputs": [
+        "receipt"
+      ]
+    }
+  ]
+}
