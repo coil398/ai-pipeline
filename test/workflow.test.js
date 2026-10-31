@@ -455,3 +455,61 @@ test("runtime inputs reject unknown IDs, invalid mappings, and missing paths bef
   assert.deepEqual((await readdir(temp)).sort(), ["inputs.json", "source.md", "workflow.json"]);
   run(["run", wf, "--run-id", "empty", ...opts(path.join(temp, "runs")), "--inputs"], 1);
 });
+
+test('components use the exec manifest and CLI directory survives continue and rerun', async (t) => {
+  const temp = await setup();
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const components = path.join(temp, 'components');
+  const component = path.join(components, 'transform');
+  await mkdir(component, { recursive: true });
+  const entry = path.join(component, 'run.mjs');
+  await writeFile(entry, `import {readFile, writeFile} from 'node:fs/promises';
+const m = JSON.parse(await readFile(process.env.AIP_MANIFEST, 'utf8'));
+const input = await readFile(m.inputs.source.path, 'utf8');
+await writeFile(m.outputs.result, JSON.stringify({input, previous:m.inputs.source.previous, version:m.version, stepId:m.stepId}));`);
+  await writeFile(path.join(temp, 'input.md'), 'source contents');
+  const workflow = path.join(temp, 'workflow.json');
+  const definition = { id: 'components', inputs: {source: 'input.md'}, steps: [
+    {id: 'transform', kind: 'exec', component: 'transform', inputs: ['source'], outputs: ['result']},
+  ] };
+  await writeFile(workflow, JSON.stringify(definition));
+  const runs = path.join(temp, 'runs');
+  run(['run', workflow, '--run-id', 'override', ...opts(runs), '--components', components]);
+  const resultFile = path.join(runs, 'override/artifacts/result');
+  assert.deepEqual(JSON.parse(await readFile(resultFile, 'utf8')), {
+    input: 'source contents', previous: [], version: 1, stepId: 'transform',
+  });
+  // A failed component remains pending and can be repaired in place.
+  await writeFile(entry, 'throw new Error("broken component");');
+  run(['rerun', '--run-id', 'override', '--from', 'transform', ...opts(runs)], 1);
+  await writeFile(entry, `import {readFile, writeFile} from 'node:fs/promises';
+const m = JSON.parse(await readFile(process.env.AIP_MANIFEST, 'utf8'));
+await writeFile(m.outputs.result, 'repaired');`);
+  run(['continue', '--run-id', 'override', ...opts(runs)]);
+  assert.equal(await readFile(resultFile, 'utf8'), 'repaired');
+  definition.components = 'components';
+  await writeFile(workflow, JSON.stringify(definition));
+  run(['run', workflow, '--run-id', 'relative', ...opts(runs)]);
+  assert.equal(await readFile(path.join(runs, 'relative/artifacts/result'), 'utf8'), 'repaired');
+  definition.components = 'absent-directory';
+  await writeFile(workflow, JSON.stringify(definition));
+  run(['run', workflow, '--run-id', 'precedence', ...opts(runs), '--components', components]);
+});
+
+test('component exec requires one command form and an existing run.mjs entry', async (t) => {
+  const step = {id: 'transform', kind: 'exec', component: 'transform', outputs: []};
+  const definition = {id: 'component', inputs: {}, steps: [step]};
+  assert.doesNotThrow(() => validateDefinition(definition));
+  assert.throws(() => validateDefinition({...definition, steps: [{...step, argv: ['node']}]}), /exactly one/);
+  for (const component of ['', '../outside', '/absolute', 'nested/name']) {
+    assert.throws(() => validateDefinition({...definition, steps: [{...step, component}]}), /exactly one/);
+  }
+  const temp = await setup();
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const workflow = path.join(temp, 'workflow.json');
+  await writeFile(workflow, JSON.stringify(definition));
+  assert.match(run(['run', workflow, '--run-id', 'no-dir', ...opts(temp)], 1), /^$/);
+  const result = spawnSync(process.execPath, [cli, 'run', workflow, '--run-id', 'missing-entry', ...opts(temp), '--components', temp], {encoding: 'utf8'});
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /missing component entry/);
+});

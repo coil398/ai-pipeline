@@ -21,7 +21,7 @@ When the frontier is empty, the run is `completed`. If pending steps cannot exec
 ## Step kinds
 
 - `llm`: `role`, `route`, ordered `inputs`, and one text `output`. The engine builds a prompt from the role text, then `# Inputs` with one `## <artifact id>` section per input, then `# Output` and the output id.
-- `exec`: `argv`, `inputs`, and `outputs`. The process receives `AIP_MANIFEST`, a JSON file containing run and step ids, version, input paths with previous versions, and output paths.
+- `exec`: exactly one of `argv` or `component`, plus `inputs` and `outputs`. The process receives `AIP_MANIFEST`, a JSON file containing run and step ids, version, input paths with previous versions, and output paths.
 - `decide`: `source`, `cases` containing `when` arrays and `goto` IDs, optional `default` ID, and a positive integer `max`. Text values are read from a `## VERDICT` section or a `VERDICT:` line. An optional `field` reads a dotted JSON field instead. Cases are evaluated in order; the first matching case activates its `goto`. Without a match, `default` is activated. If neither applies, the run fails with a reason. A decide uses only `goto` / `default` for transitions; its `next` is ignored.
 
 Every decide execution increments `rounds[<step id>]`. Before another execution would exceed `max`, the engine stops with `stopped: max-rounds`, leaving the decide pending. All transitions use the same activation rules, including transitions to a previously executed step. Repeated execution creates a new version; each artifact's current value is the most recent write.
@@ -52,3 +52,20 @@ Fixture mode reads `--llm fixtures/<set>` from `<set>/<step>/v<N>.md`, falling b
 Each workflow directory may contain `routes.json` and `gateways.json`; `run`, `continue`, and `rerun` accept `--routes <path>` and `--gateways <path>` to override them. A route name maps to an ordered array of `{gateway, model, effort}` entries. `openai-chat` gateways use `{kind, baseUrl, apiKeyEnv, maxParallel?, cooldownMs?, timeoutMs?}`. `exec` gateways use `{kind, argv, limitPatterns?, cooldownMs?, timeoutMs?}`; `{model}` and `{effort}` are expanded in argv, and the prompt is sent on stdin. A `human` route uses the human input flow.
 
 A 429, 402, or matching CLI limit pattern cools down that gateway and advances to the next route. Cooldowns are stored in `~/.cache/ai-pipeline/cooldown.json`, or `AIP_COOLDOWN_PATH`. `Retry-After` takes precedence over gateway `cooldownMs`, then a 60 minute default. Other errors fail the step. Each LLM attempt writes `usage.json` with token counts and route outcomes.
+
+## Components
+
+An `exec` step specifies exactly one of `argv` or `component`, with the same `inputs` and `outputs` in either form. A component is a directory named by the step's `component` (letters, digits, underscores, and hyphens), containing a `run.mjs` entry. The engine starts that entry with its Node.js executable in the workflow directory and passes the regular `AIP_MANIFEST`. The component reads the manifest's input paths and writes its output paths. It has no engine hooks or validation interface.
+
+Set the workflow's `components` directory relative to `workflow.json`, or pass `--components <dir>` relative to the CLI working directory to override it. The CLI override is saved with the run and reused by `continue` and `rerun`; either command can override it again.
+
+```json
+{
+  "id": "transform",
+  "components": "../../components",
+  "inputs": { "source": "source.md" },
+  "steps": [
+    { "id": "convert", "kind": "exec", "component": "convert-table", "inputs": ["source"], "outputs": ["table"] }
+  ]
+}
+```

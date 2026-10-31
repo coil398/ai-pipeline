@@ -17,6 +17,8 @@ The engine saves the pending set (`frontier`), decision counts, step execution c
 
 Use `--llm <fixture-directory>`, `--llm human`, or `--llm run:<run-id>` for fixture responses, human responses, or replay from another run. Run checks with `npm test` (`node --test`).
 
+An `exec` step can name a local `component` instead of `argv`. Set `components` in the workflow or use `--components <dir>`; each component runs `<dir>/<name>/run.mjs` with the standard `AIP_MANIFEST` input and output paths. See [components](docs/definition.md#components).
+
 ## LLM routes
 
 Place `routes.json` and `gateways.json` beside `workflow.json`. Routes map names to ordered `{gateway, model, effort}` entries. Gateways use the built-in `openai-chat` HTTP interface or `exec` CLI interface; credentials are read from the named environment variable. Override the files with `--routes <path>` and `--gateways <path>`. Rate and usage limits cool down the gateway and advance to the next route. See [the definition guide](docs/definition.md) for configuration details.

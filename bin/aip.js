@@ -20,7 +20,7 @@ function option(name, fallback = undefined) {
 }
 function usage() {
   console.log(
-    "aip run <workflow.json> --run-id <id> [--inputs <file.json>] [--runs-dir <dir>] [--parallel <n>] [--llm <fixture-dir>|run:<run-id>] [--routes <path>] [--gateways <path>]\naip continue --run-id <id>\naip rerun --run-id <id> --from <step>\naip status --run-id <id>\naip render --run-id <id>",
+    "aip run <workflow.json> --run-id <id> [--inputs <file.json>] [--components <dir>] [--runs-dir <dir>] [--parallel <n>] [--llm <fixture-dir>|run:<run-id>] [--routes <path>] [--gateways <path>]\naip continue --run-id <id> [--components <dir>]\naip rerun --run-id <id> --from <step> [--components <dir>]\naip status --run-id <id>\naip render --run-id <id>",
   );
 }
 async function main() {
@@ -30,6 +30,11 @@ async function main() {
   if (!runId) throw new Error("--run-id is required");
   const runsDir = path.resolve(option("--runs-dir", "runs"));
   const runDir = path.join(runsDir, runId);
+  const componentsOption = option("--components");
+  if (args.includes("--components") && (!componentsOption || componentsOption.startsWith("--"))) {
+    throw new Error("--components requires a directory");
+  }
+  const componentsDir = componentsOption ? path.resolve(componentsOption) : undefined;
   const parallel = Number(option("--parallel", "4"));
   if (
     !["status", "render"].includes(command) &&
@@ -57,7 +62,7 @@ async function main() {
       overrides = Object.fromEntries(Object.entries(value).map(([id, input]) =>
         [id, path.resolve(path.dirname(file), input)]));
     }
-    const loaded = await loadDefinition(args[1], overrides);
+    const loaded = await loadDefinition(args[1], overrides, { componentsDir });
     if (inputsFile) log("INFO", "inputs_loaded", {
       run_id: runId, file: path.resolve(inputsFile), count: Object.keys(overrides).length,
     });
@@ -86,7 +91,8 @@ async function main() {
   const loaded = await loadDefinition(initialState.definitionFile,
     Object.fromEntries(Object.entries(initialState.artifacts)
       .filter(([, artifact]) => artifact.producer === null)
-      .map(([id, artifact]) => [id, artifact.path])));
+      .map(([id, artifact]) => [id, artifact.path])),
+    { componentsDir: componentsDir ?? initialState.componentsDir });
   if (command === "rerun") {
     const start = option("--from");
     const startIndex = loaded.definition.steps.findIndex((step) =>
@@ -110,6 +116,8 @@ async function main() {
   });
 }
 async function runLoaded(loaded, runDir, state, parallel) {
+  const componentsDir = option("--components");
+  if (componentsDir) state.componentsDir = path.resolve(componentsDir);
   const resumeHuman = state.status === "waiting-human";
   const llmMode = option("--llm", state.llmMode ?? "router");
   state.llmMode = llmMode;

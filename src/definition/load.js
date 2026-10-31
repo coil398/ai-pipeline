@@ -1,11 +1,13 @@
 import path from "node:path";
 import { exists, readJson } from "../io/files.js";
 
-/** @typedef {{ id: string, kind: 'llm'|'exec'|'decide', inputs?: string[], role?: string, route?: string, output?: string, outputs?: string[], argv?: string[], source?: string, field?: string, cases?: Array<{when: string[], goto: string}>, max?: number, next?: string[], waitFor?: string[], default?: string }} WorkflowStep */
-/** @typedef {{ id: string, inputs: Record<string, string>, steps: WorkflowStep[] }} Workflow */
+const process = /** @type {any} */ (globalThis).process;
 
-/** @param {string} file @param {Record<string, string>} [inputOverrides] @returns {Promise<{definition: Workflow, file: string, directory: string}>} */
-export async function loadDefinition(file, inputOverrides = {}) {
+/** @typedef {{ id: string, kind: 'llm'|'exec'|'decide', inputs?: string[], role?: string, route?: string, output?: string, outputs?: string[], argv?: string[], component?: string, source?: string, field?: string, cases?: Array<{when: string[], goto: string}>, max?: number, next?: string[], waitFor?: string[], default?: string }} WorkflowStep */
+/** @typedef {{ id: string, inputs: Record<string, string>, components?: string, steps: WorkflowStep[] }} Workflow */
+
+/** @param {string} file @param {Record<string, string>} [inputOverrides] @param {{componentsDir?: string}} [options] @returns {Promise<{definition: Workflow, file: string, directory: string}>} */
+export async function loadDefinition(file, inputOverrides = {}, options = {}) {
   const absolute = path.resolve(file);
   const value = await readJson(absolute);
   validateDefinition(value);
@@ -19,7 +21,15 @@ export async function loadDefinition(file, inputOverrides = {}) {
       !await exists(path.resolve(path.dirname(absolute), input))
     ) throw new Error(`missing input file for ${id}: ${input}`);
   }
+  const componentsDir = options.componentsDir ?? (value.components === undefined
+    ? undefined : path.resolve(path.dirname(absolute), value.components));
   for (const step of value.steps) {
+    if (step.component !== undefined) {
+      if (!componentsDir) throw new Error(`components directory required for ${step.id}`);
+      const entry = path.resolve(componentsDir, step.component, "run.mjs");
+      if (!await exists(entry)) throw new Error(`missing component entry for ${step.id}: ${entry}`);
+      step.argv = [process.execPath, entry];
+    }
     if (
       step.role &&
       !await exists(path.resolve(path.dirname(absolute), step.role))
@@ -47,6 +57,9 @@ export function validateDefinition(definition) {
     !Array.isArray(definition.steps) || !definition.inputs ||
     typeof definition.inputs !== "object" || Array.isArray(definition.inputs)
   ) throw new Error("invalid workflow shape");
+  if (definition.components !== undefined && typeof definition.components !== "string") {
+    throw new Error("components must be a directory path");
+  }
   const ids = new Set();
   for (const step of definition.steps) {
     if (!step || typeof step.id !== "string" || ids.has(step.id)) {
@@ -85,12 +98,15 @@ export function validateDefinition(definition) {
     }
     if (step.kind === "exec") {
       if (
-        !Array.isArray(step.argv) || !step.argv.length ||
-        step.argv.some((arg) => typeof arg !== "string") ||
+        (step.argv === undefined) === (step.component === undefined) ||
+        (step.argv !== undefined && (!Array.isArray(step.argv) || !step.argv.length ||
+          step.argv.some((arg) => typeof arg !== "string"))) ||
+        (step.component !== undefined && (typeof step.component !== "string" ||
+          !/^[a-zA-Z0-9_-]+$/.test(step.component))) ||
         !Array.isArray(step.outputs) || step.outputs.some((output) =>
           typeof output !== "string"
         )
-      ) throw new Error(`exec requires argv and outputs: ${step.id}`);
+      ) throw new Error(`exec requires exactly one of argv or component, and outputs: ${step.id}`);
     }
     if (step.kind === "decide") {
       if (
