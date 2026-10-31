@@ -27,7 +27,7 @@ const unused = { id: 'unused', kind: 'exec', argv: ['true'], outputs: ['absent']
 test('optional LLM inputs omit missing artifacts and include the previous output on reentry', async (t) => {
   const options = await setup(t, [
     { id: 'evaluate', kind: 'llm', role: 'role.md', route: 'test', inputs: ['source'], optionalInputs: ['result', 'absent', 'never', 'source'], output: 'result', next: ['again'] },
-    { id: 'again', kind: 'decide', source: 'result', cases: [{ when: ['FAIL'], goto: 'evaluate' }], default: 'finish', max: 2 },
+    { id: 'again', kind: 'decide', source: 'result', cases: [{ when: ['FAIL'], goto: 'evaluate', max: 2 }], default: 'finish' },
     { id: 'finish', kind: 'exec', argv: ['true'], outputs: [], next: [] },
     { ...unused, outputs: ['absent', 'never'] },
   ]);

@@ -102,7 +102,7 @@ async function main() {
     return withLease(runDir, async () => {
       const state = await loadState(runDir);
       state.frontier = [start];
-      for (const id of Object.keys(state.rounds)) state.rounds[id] = 0;
+      for (const id of Object.keys(state.rounds)) state.rounds[id] = {};
       state.status = "running";
       delete state.error;
       await saveState(runDir, state);
@@ -220,8 +220,8 @@ function renderState(state) {
     ...Object.entries(state.steps).map(([id, value]) =>
       `- ${id}: ${value.status}${value.selected ? ` -> ${value.selected}` : ""}`
     ),
-    ...Object.entries(state.rounds).map(([id, count]) =>
-      `- ${id} round=${count}`
+    ...Object.entries(state.rounds).flatMap(([id, counts]) =>
+      Object.entries(counts).map(([index, count]) => `- ${id} case=${index} round=${count}`)
     ),
   ].join("\n");
 }

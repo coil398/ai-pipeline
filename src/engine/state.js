@@ -13,7 +13,11 @@ export async function saveState(runDir, state) {
   await pending;
 }
 export async function loadState(runDir) {
-  return readJson(statePath(runDir));
+  const state = await readJson(statePath(runDir));
+  for (const [id, counts] of Object.entries(state.rounds)) {
+    if (typeof counts === "number") state.rounds[id] = {};
+  }
+  return state;
 }
 export async function initializeState(
   runDir,
@@ -39,7 +43,7 @@ export async function initializeState(
     ),
     rounds: Object.fromEntries(
       definition.steps.filter((step) => step.kind === "decide").map(
-        (step) => [step.id, 0],
+        (step) => [step.id, {}],
       ),
     ),
     artifacts,

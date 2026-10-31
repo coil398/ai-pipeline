@@ -23,7 +23,7 @@ export function extractVerdict(text, field = undefined) {
   }
   return "";
 }
-/** @param {{cases: Array<{when: string[], goto: string}>, field?: string}} step @param {string} text @returns {{when: string[], goto: string}|null} */
+/** @param {{cases: Array<{when: string[], goto: string, max?: number}>, field?: string}} step @param {string} text @returns {{when: string[], goto: string, max?: number}|null} */
 export function chooseCase(step, text) {
   const verdict = extractVerdict(text, step.field);
   return step.cases.find((item) => item.when.includes(verdict)) ?? null;

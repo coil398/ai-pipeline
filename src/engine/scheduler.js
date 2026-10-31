@@ -57,20 +57,27 @@ export async function schedule(
         break;
       }
       const decision = batch.find((step) => step.kind === "decide");
-      if (decision && state.rounds[decision.id] >= decision.max) {
-        state.status = "stopped: max-rounds";
-        break;
+      const selectedCase = decision
+        ? chooseCase(decision, await readText(state.artifacts[decision.source].path)) : null;
+      if (selectedCase?.max !== undefined) {
+        const index = decision.cases.indexOf(selectedCase);
+        const counts = state.rounds[decision.id] ??= {};
+        if ((counts[index] ?? 0) >= selectedCase.max) {
+          log("INFO", "case_limit", { run_id: state.runId, step_id: decision.id, case_index: index, count: counts[index], max: selectedCase.max });
+          state.status = "stopped: max-rounds";
+          break;
+        }
+        counts[index] = (counts[index] ?? 0) + 1;
       }
       const active = new Set(batch.map((step) => step.id));
       const reactivated = new Set();
       const outcomes = await Promise.allSettled(batch.map(async (step) => {
-        if (step.kind === "decide") state.rounds[step.id]++;
         const record = state.steps[step.id];
         record.startedSequence = ++state.sequence;
         const started = Date.now();
         log("INFO", "step_start", { run_id: state.runId, step_id: step.id, version: record.attempts + 1 });
         try {
-          await execute({ step, definition, definitionDir, runDir, state, gateway });
+          await execute({ step, definition, definitionDir, runDir, state, gateway, selectedCase });
           record.status = "completed";
           record.completedAt = new Date().toISOString();
           record.completedSequence = ++state.sequence;
@@ -124,7 +131,7 @@ async function allInputsExist(step, state) {
   return true;
 }
 async function execute(
-  { step, definition, definitionDir, runDir, state, gateway },
+  { step, definition, definitionDir, runDir, state, gateway, selectedCase },
 ) {
   const record = state.steps[step.id];
   const version = ++record.attempts;
@@ -223,8 +230,7 @@ async function execute(
       state.artifacts[id] = { path: current, producer: step.id, version };
     }
   } else {
-    const source = await readText(state.artifacts[step.source].path);
-    const selected = chooseCase(step, source)?.goto ?? step.default;
+    const selected = selectedCase?.goto ?? step.default;
     if (!selected) throw new Error(`no matching case in ${step.id} and no default`);
     record.selected = selected;
   }

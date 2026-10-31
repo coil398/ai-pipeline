@@ -47,7 +47,7 @@ test("review loop passes FAIL to revise and completes on PASS", async (t) => {
   assert.equal(s.steps.draft.attempts, 1);
   assert.equal(s.steps.critic.attempts, 2);
   assert.equal(s.steps.revise.attempts, 1);
-  assert.equal(s.rounds.gate, 2);
+  assert.deepEqual(s.rounds.gate, { 1: 1 });
   assert.match(
     await readFile(
       path.join(runs, "loop/steps/revise/v1/a1/prompt.md"),
@@ -73,14 +73,14 @@ test("max rounds stops and rerun resets the loop", async (t) => {
     await readFile(path.join(runs, "loop/state.json"), "utf8"),
   );
   assert.equal(s.status, "stopped: max-rounds");
-  assert.equal(s.rounds.gate, 3);
+  assert.deepEqual(s.rounds.gate, { 1: 3 });
   assert.deepEqual(s.frontier, ["gate"]);
   assert.equal(s.steps.gate.attempts, 3);
   await writeFile(path.join(fixture, "critic.md"), "VERDICT: PASS\nReady.\n");
   run(["rerun", "--run-id", "loop", "--from", "revise", ...opts(runs)]);
   s = JSON.parse(await readFile(path.join(runs, "loop/state.json"), "utf8"));
   assert.equal(s.status, "completed", s.error);
-  assert.equal(s.rounds.gate, 1);
+  assert.deepEqual(s.rounds.gate, {});
   assert.equal(s.steps.gate.attempts, 4);
   assert.equal(s.steps.revise.attempts, 4);
   assert.ok(
@@ -152,7 +152,6 @@ test("definition rejects unresolved inputs and unknown goto", () => {
           id: "gate",
           kind: "decide",
           source: "provided",
-          max: 1,
           cases: [{ when: ["PASS"], goto: "missing" }],
         }],
       }),
@@ -330,20 +329,20 @@ const textStep = (id, inputs, output, next) => ({ id, kind: "llm", role: "role.m
 test("two decisions do not reactivate an unselected dependency path", async (t) => {
   const { state } = await engineRun(t, [
     textStep("a", ["repair-value"], "a-value", ["g1"]),
-    { id: "g1", kind: "decide", source: "a-value", max: 2, cases: [{when: ["PASS"], goto: "b"}, {when: ["FAIL"], goto: "repair"}] },
+    { id: "g1", kind: "decide", source: "a-value", cases: [{when: ["PASS"], goto: "b"}, {when: ["FAIL"], goto: "repair"}] },
     textStep("repair", ["b-value"], "repair-value", ["a"]),
     textStep("b", [], "b-value", ["g2"]),
-    { id: "g2", kind: "decide", source: "b-value", max: 2, cases: [{when: ["FAIL"], goto: "repair"}, {when: ["PASS"], goto: "end"}] },
+    { id: "g2", kind: "decide", source: "b-value", cases: [{when: ["FAIL"], goto: "repair"}, {when: ["PASS"], goto: "end"}] },
     command("end", []),
   ], undefined, { "repair-value": "seed.md" });
   assert.equal(state.status, "completed", state.error);
   assert.equal(state.steps.a.attempts, 1);
   assert.equal(state.steps.repair.attempts, 0);
-  assert.equal(state.rounds.g1, 1);
+  assert.deepEqual(state.rounds.g1, {});
 });
 test("unmatched decision fails with reason; first matching case wins over default", async (t) => {
   const steps = [textStep("source", [], "value", ["gate"]),
-    { id: "gate", kind: "decide", source: "value", max: 1, cases: [{ when: ["OTHER"], goto: "end" }] }, command("end", [])];
+    { id: "gate", kind: "decide", source: "value", cases: [{ when: ["OTHER"], goto: "end" }] }, command("end", [])];
   const result = await engineRun(t, steps);
   assert.equal(result.state.status, "failed");
   assert.match(result.state.error, /no matching case/);
@@ -384,7 +383,7 @@ test("waitFor ignores completions from before a failed join rerun", async (t) =>
     command("a", ["join"]),
     { ...command("b", ["join"]), inputs: ["missing-input"] },
     { ...textStep("join", [], "gate-value", ["gate"]), waitFor: ["a", "b"] },
-    { id: "gate", kind: "decide", source: "gate-value", max: 3, cases: [] },
+    { id: "gate", kind: "decide", source: "gate-value", cases: [] },
   ] };
   const state = await initializeState(temp, definition, "", {});
   state.frontier = ["a", "b", "join"];
@@ -405,12 +404,12 @@ test("waitFor activates a join once before advancing its decision", async (t) =>
     command("a", ["join"]),
     command("b", ["join"]),
     { ...textStep("join", [], "gate-value", ["gate"]), waitFor: ["a", "b"] },
-    { id: "gate", kind: "decide", source: "gate-value", max: 3, cases: [{ when: ["PASS"], goto: "end" }] },
+    { id: "gate", kind: "decide", source: "gate-value", cases: [{ when: ["PASS"], goto: "end" }] },
     command("end", []),
   ], async () => "VERDICT: PASS");
   assert.equal(state.status, "completed", state.error);
   assert.equal(state.steps.join.attempts, 1);
-  assert.equal(state.rounds.gate, 1);
+  assert.deepEqual(state.rounds.gate, {});
 });
 
 test("activation during execution schedules another version", async (t) => {
@@ -432,7 +431,7 @@ test("definition validates transition and join references", () => {
     }
   }
   assert.throws(() => validateDefinition({ id: "x", inputs: { value: "value.md" },
-    steps: [{ id: "gate", kind: "decide", source: "value", max: 1, cases: [], default: "missing" }] }), /unknown default/);
+    steps: [{ id: "gate", kind: "decide", source: "value", cases: [], default: "missing" }] }), /unknown default/);
 });
 
 test("runtime inputs resolve from the JSON file and survive continue and rerun", async (t) => {
@@ -548,4 +547,63 @@ test('component exec requires one command form and an existing run.mjs entry', a
   const result = spawnSync(process.execPath, [cli, 'run', workflow, '--run-id', 'missing-entry', ...opts(temp), '--components', temp], {encoding: 'utf8'});
   assert.equal(result.status, 1);
   assert.match(result.stderr, /missing component entry/);
+});
+
+test("passing an upstream decision repeatedly does not spend its repair limit", async (t) => {
+  const { state } = await engineRun(t, [
+    textStep("quality", [], "quality-result", ["quality-gate"]),
+    { id: "quality-gate", kind: "decide", source: "quality-result", cases: [
+      { when: ["PASS"], goto: "review" }, { when: ["FAIL"], goto: "quality", max: 1 },
+    ] },
+    textStep("review", [], "review-result", ["review-gate"]),
+    { id: "review-gate", kind: "decide", source: "review-result", cases: [
+      { when: ["FAIL"], goto: "quality", max: 4 }, { when: ["PASS"], goto: "end" },
+    ] }, command("end", []),
+  ], async ({step, version}) => `VERDICT: ${step.id === "review" && version <= 4 ? "FAIL" : "PASS"}`);
+  assert.equal(state.status, "completed", state.error);
+  assert.equal(state.steps["quality-gate"].attempts, 5);
+  assert.deepEqual(state.rounds["quality-gate"], {});
+  assert.deepEqual(state.rounds["review-gate"], { 0: 4 });
+});
+
+test("case counts persist independently even for cases sharing a destination", async (t) => {
+  const result = await engineRun(t, [textStep("source", [], "value", ["gate"]),
+    { id: "gate", kind: "decide", source: "value", cases: [
+      { when: ["A"], goto: "source", max: 1 }, { when: ["B"], goto: "source", max: 2 },
+    ] },
+  ], async ({version}) => `VERDICT: ${version === 1 ? "A" : "B"}`);
+  const { state, temp, definition, gateway } = result;
+  assert.equal(state.status, "stopped: max-rounds");
+  assert.deepEqual(state.rounds.gate, { 0: 1, 1: 2 });
+  assert.equal(state.steps.source.attempts, 4);
+  assert.equal(state.steps.gate.attempts, 3);
+  const restored = await loadState(temp);
+  await schedule({definition, definitionDir: temp, runDir: temp, state: restored, gateway});
+  assert.equal(restored.status, "stopped: max-rounds");
+  assert.deepEqual(restored.rounds.gate, { 0: 1, 1: 2 });
+  assert.equal(restored.steps.gate.attempts, 3);
+  // Numeric totals from old saved states cannot identify a selected case.
+  restored.rounds.gate = 99;
+  await saveState(temp, restored);
+  const legacy = await loadState(temp);
+  assert.deepEqual(legacy.rounds.gate, {});
+  await schedule({definition, definitionDir: temp, runDir: temp, state: legacy, gateway});
+  assert.equal(legacy.status, "stopped: max-rounds");
+  assert.deepEqual(legacy.rounds.gate, { 1: 2 });
+  assert.equal(legacy.steps.gate.attempts, 5);
+});
+
+test("definition rejects decide max and requires positive integer case limits", () => {
+  const gate = { id: "gate", kind: "decide", source: "value", cases: [{when: ["FAIL"], goto: "gate"}] };
+  const definition = {id: "limits", inputs: {value: "value.md"}, steps: [gate]};
+  validateDefinition(definition);
+  gate.max = 1;
+  assert.throws(() => validateDefinition(definition), /invalid decide/);
+  delete gate.max;
+  for (const max of [0, -1, 1.5, null, "2"]) {
+    gate.cases[0].max = max;
+    assert.throws(() => validateDefinition(definition), /invalid case/);
+  }
+  gate.cases[0].max = 2;
+  validateDefinition(definition);
 });

@@ -3,7 +3,7 @@ import { exists, readJson } from "../io/files.js";
 
 const process = /** @type {any} */ (globalThis).process;
 
-/** @typedef {{ id: string, kind: 'llm'|'exec'|'decide', inputs?: string[], optionalInputs?: string[], role?: string, route?: string, output?: string, outputs?: string[], argv?: string[], component?: string, source?: string, field?: string, cases?: Array<{when: string[], goto: string}>, max?: number, next?: string[], waitFor?: string[], default?: string }} WorkflowStep */
+/** @typedef {{ id: string, kind: 'llm'|'exec'|'decide', inputs?: string[], optionalInputs?: string[], role?: string, route?: string, output?: string, outputs?: string[], argv?: string[], component?: string, source?: string, field?: string, cases?: Array<{when: string[], goto: string, max?: number}>, next?: string[], waitFor?: string[], default?: string }} WorkflowStep */
 /** @typedef {{ id: string, inputs: Record<string, string>, components?: string, steps: WorkflowStep[] }} Workflow */
 
 /** @param {string} file @param {Record<string, string>} [inputOverrides] @param {{componentsDir?: string}} [options] @returns {Promise<{definition: Workflow, file: string, directory: string}>} */
@@ -112,14 +112,14 @@ export function validateDefinition(definition) {
     if (step.kind === "decide") {
       if (
         !step.source || !artifacts.has(step.source) ||
-        !Array.isArray(step.cases) || !Number.isInteger(step.max) ||
-        step.max < 1
+        !Array.isArray(step.cases) || Object.hasOwn(step, "max")
       ) throw new Error(`invalid decide: ${step.id}`);
       for (const item of step.cases) {
         if (
           !Array.isArray(item.when) || item.when.some((value) =>
             typeof value !== "string"
-          ) || typeof item.goto !== "string"
+          ) || typeof item.goto !== "string" ||
+          (Object.hasOwn(item, "max") && (!Number.isInteger(item.max) || item.max < 1))
         ) throw new Error(`invalid case in ${step.id}`);
       }
     }

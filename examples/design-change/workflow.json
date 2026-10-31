@@ -36,7 +36,6 @@
       "id": "plan-gate",
       "kind": "decide",
       "source": "plan-verdict",
-      "max": 3,
       "cases": [
         {
           "when": [
@@ -48,7 +47,8 @@
           "when": [
             "FAIL"
           ],
-          "goto": "plan-revise"
+          "goto": "plan-revise",
+          "max": 3
         }
       ]
     },
@@ -114,7 +114,6 @@
       "id": "visual-gate",
       "kind": "decide",
       "source": "visual-verdict",
-      "max": 3,
       "cases": [
         {
           "when": [
@@ -126,7 +125,8 @@
           "when": [
             "FAIL"
           ],
-          "goto": "implement"
+          "goto": "implement",
+          "max": 3
         }
       ]
     },
@@ -147,7 +147,6 @@
       "id": "reader-gate",
       "kind": "decide",
       "source": "reader-verdict",
-      "max": 3,
       "cases": [
         {
           "when": [
@@ -159,7 +158,8 @@
           "when": [
             "FAIL"
           ],
-          "goto": "implement"
+          "goto": "implement",
+          "max": 3
         }
       ]
     },

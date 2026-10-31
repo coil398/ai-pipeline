@@ -22,9 +22,9 @@ When the frontier is empty, the run is `completed`. If pending steps cannot exec
 
 - `llm`: `role`, `route`, ordered `inputs`, and one text `output`. The engine builds a prompt from the role text, then `# Inputs` with one `## <artifact id>` section per input, then `# Output` and the output id.
 - `exec`: exactly one of `argv` or `component`, plus `inputs` and `outputs`. The process receives `AIP_MANIFEST`, a JSON file containing run and step ids, version, input paths with previous versions, and output paths.
-- `decide`: `source`, `cases` containing `when` arrays and `goto` IDs, optional `default` ID, and a positive integer `max`. Text values are read from a `## VERDICT` section or a `VERDICT:` line. An optional `field` reads a dotted JSON field instead. Cases are evaluated in order; the first matching case activates its `goto`. Without a match, `default` is activated. If neither applies, the run fails with a reason. A decide uses only `goto` / `default` for transitions; its `next` is ignored.
+- `decide`: `source`, `cases` containing `when` arrays, `goto` IDs, and an optional positive integer `max`, plus an optional `default` ID. A decide-level `max` is rejected. Text values are read from a `## VERDICT` section or a `VERDICT:` line. An optional `field` reads a dotted JSON field instead. Cases are evaluated in order; the first matching case activates its `goto`. Without a match, `default` is activated. If neither applies, the run fails with a reason. A decide uses only `goto` / `default` for transitions; its `next` is ignored.
 
-Every decide execution increments `rounds[<step id>]`. Before another execution would exceed `max`, the engine stops with `stopped: max-rounds`, leaving the decide pending. All transitions use the same activation rules, including transitions to a previously executed step. Repeated execution creates a new version; each artifact's current value is the most recent write.
+Selecting a case with `max` increments `rounds[<step id>][<zero-based case index>]`. Before a selection would exceed that case's `max`, the engine stops with `stopped: max-rounds`, leaving the decide pending and its count unchanged. Cases without `max` and the default transition are not counted. Saved numeric decision counts from older states are discarded on load; case counts start at zero. All transitions use the same activation rules, including transitions to a previously executed step. Repeated execution creates a new version; each artifact's current value is the most recent write.
 
 ```json
 {
@@ -43,7 +43,7 @@ Every decide execution increments `rounds[<step id>]`. Before another execution 
 
 A run stores `state.json`, `run.lease`, step versions under `steps/<step>/v<N>/a1/`, and current artifact files under `artifacts/<id>`. Each execution attempt gets a new version, including retries after failure or human waiting. State saves the frontier, rounds, artifacts, execution counts (`steps[id].attempts`), and completion sequence numbers after each step completes. Concurrent state writes are serialized.
 
-`continue` resumes the saved frontier, retrying failed or interrupted work. `rerun --from <step>` replaces the frontier with that single step and resets every decision's rounds to zero. Both preserve current artifacts and past step versions. A rerun retains `waitFor` completion history and must satisfy the same fresh-completion rule.
+`continue` resumes the saved frontier, retrying failed or interrupted work. `rerun --from <step>` replaces the frontier with that single step and resets every case's count to zero. Both preserve current artifacts and past step versions. A rerun retains `waitFor` completion history and must satisfy the same fresh-completion rule.
 
 Fixture mode reads `--llm fixtures/<set>` from `<set>/<step>/v<N>.md`, falling back to `<set>/<step>.md`. `--llm run:<run-id>` reads the corresponding step/version from another run. Human mode writes the prompt and sets `waiting-human` until `output.md` exists in the attempt directory; continue consumes that response.
 

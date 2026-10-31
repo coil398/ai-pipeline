@@ -34,7 +34,6 @@
       "id": "gate",
       "kind": "decide",
       "source": "critique",
-      "max": 3,
       "cases": [
         {
           "when": [
@@ -46,7 +45,8 @@
           "when": [
             "FAIL"
           ],
-          "goto": "revise"
+          "goto": "revise",
+          "max": 3
         }
       ]
     },
