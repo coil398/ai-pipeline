@@ -135,6 +135,11 @@ async function runLoaded(loaded, runDir, state, parallel) {
   const gateways = await exists(gatewaysFile)
     ? JSON.parse(await readText(gatewaysFile))
     : {};
+  for (const gateway of Object.values(gateways)) {
+    if (gateway.kind === "openai-chat" && gateway.envFile) {
+      gateway.envFile = path.resolve(path.dirname(gatewaysFile), gateway.envFile);
+    }
+  }
   let gateway;
   if (llmMode === "router") {
     gateway = async (context) => {

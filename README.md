@@ -21,4 +21,5 @@ An `exec` step can name a local `component` instead of `argv`. Set `components` 
 
 ## LLM routes
 
-Place `routes.json` and `gateways.json` beside `workflow.json`. Routes map names to ordered `{gateway, model, effort}` entries. Gateways use the built-in `openai-chat` HTTP interface or `exec` CLI interface; credentials are read from the named environment variable. Override the files with `--routes <path>` and `--gateways <path>`. Rate and usage limits cool down the gateway and advance to the next route. See [the definition guide](docs/definition.md) for configuration details.
+Place `routes.json` and `gateways.json` beside `workflow.json`. Routes map names to ordered `{gateway, model, effort}` entries. Gateways use the built-in `openai-chat` HTTP interface or `exec` CLI interface; credentials are read from the named environment variable. For `openai-chat`, optional `envFile` reads that key from a KEY=VALUE file when the process environment variable is empty; relative paths are resolved from `gateways.json`.
+Override the files with `--routes <path>` and `--gateways <path>`. Rate and usage limits cool down the gateway and advance to the next route. See [the definition guide](docs/definition.md) for configuration details.

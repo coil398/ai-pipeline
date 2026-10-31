@@ -34,6 +34,59 @@ test("openai chat rejects an empty API key before fetch", async () => {
     globalThis.fetch = priorFetch;
   }
 });
+test("openai chat reads the named key from envFile without changing process.env", async (t) => {
+  const { openaiChat } = await import("../src/llm/gateways/openai-chat.js");
+  const dir = await tempRoot();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const envFile = path.join(dir, "keys.env");
+  await writeFile(envFile, '# ignored\nOTHER=value\nTEST_FILE_KEY="file-secret"\n');
+  const priorKey = process.env.TEST_FILE_KEY;
+  const priorFetch = globalThis.fetch;
+  delete process.env.TEST_FILE_KEY;
+  let authorization;
+  globalThis.fetch = async (_url, options) => {
+    authorization = options.headers.authorization;
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "ok" } }] }) };
+  };
+  try {
+    await openaiChat(
+      { baseUrl: "http://example.invalid", apiKeyEnv: "TEST_FILE_KEY", envFile },
+      { model: "m", prompt: "p" },
+    );
+    assert.equal(authorization, "Bearer file-secret");
+    assert.equal(process.env.TEST_FILE_KEY, undefined);
+  } finally {
+    if (priorKey === undefined) delete process.env.TEST_FILE_KEY;
+    else process.env.TEST_FILE_KEY = priorKey;
+    globalThis.fetch = priorFetch;
+  }
+});
+test("openai chat prefers process.env over envFile", async (t) => {
+  const { openaiChat } = await import("../src/llm/gateways/openai-chat.js");
+  const dir = await tempRoot();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const envFile = path.join(dir, "keys.env");
+  await writeFile(envFile, "TEST_PRIORITY_KEY=file-secret\n");
+  const priorKey = process.env.TEST_PRIORITY_KEY;
+  const priorFetch = globalThis.fetch;
+  process.env.TEST_PRIORITY_KEY = "process-secret";
+  let authorization;
+  globalThis.fetch = async (_url, options) => {
+    authorization = options.headers.authorization;
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "ok" } }] }) };
+  };
+  try {
+    await openaiChat(
+      { baseUrl: "http://example.invalid", apiKeyEnv: "TEST_PRIORITY_KEY", envFile },
+      { model: "m", prompt: "p" },
+    );
+    assert.equal(authorization, "Bearer process-secret");
+  } finally {
+    if (priorKey === undefined) delete process.env.TEST_PRIORITY_KEY;
+    else process.env.TEST_PRIORITY_KEY = priorKey;
+    globalThis.fetch = priorFetch;
+  }
+});
 function run(args, env, expected = 0) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [cli, ...args], {
