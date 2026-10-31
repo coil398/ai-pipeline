@@ -2,6 +2,12 @@
 
 A workflow is one `workflow.json` file with `id`, `inputs`, and an ordered `steps` array. Input paths and role paths are relative to the definition. The loader checks step IDs, artifact references, transition targets, and role/command files at load time.
 
+## Runtime inputs
+
+`aip run workflow.json --run-id example --inputs inputs.json` replaces only the specified definition input IDs. The JSON file is an object mapping input IDs to path strings, for example `{"source": "./data/source.md"}`. These paths are relative to the JSON file, while unspecified inputs remain relative to the workflow definition. Unknown IDs, invalid mappings, and missing effective input files fail before the run starts. Replaced default paths need not exist.
+
+Resolved input paths are saved in run state. `continue` and `rerun` reuse those paths without requiring the override JSON or the replaced default files.
+
 ## Execution and transitions
 
 A new run starts with the first step in its pending set (`frontier`). An empty steps array completes immediately. A pending step can execute when its input artifact files exist and its `waitFor` condition is satisfied. Ready steps execute concurrently up to `--parallel` and gateway `maxParallel` limits. Steps writing the same artifact execute in separate batches.

@@ -4,11 +4,15 @@ import { exists, readJson } from "../io/files.js";
 /** @typedef {{ id: string, kind: 'llm'|'exec'|'decide', inputs?: string[], role?: string, route?: string, output?: string, outputs?: string[], argv?: string[], source?: string, field?: string, cases?: Array<{when: string[], goto: string}>, max?: number, next?: string[], waitFor?: string[], default?: string }} WorkflowStep */
 /** @typedef {{ id: string, inputs: Record<string, string>, steps: WorkflowStep[] }} Workflow */
 
-/** @param {string} file @returns {Promise<{definition: Workflow, file: string, directory: string}>} */
-export async function loadDefinition(file) {
+/** @param {string} file @param {Record<string, string>} [inputOverrides] @returns {Promise<{definition: Workflow, file: string, directory: string}>} */
+export async function loadDefinition(file, inputOverrides = {}) {
   const absolute = path.resolve(file);
   const value = await readJson(absolute);
   validateDefinition(value);
+  for (const [id, input] of Object.entries(inputOverrides)) {
+    if (!Object.hasOwn(value.inputs, id)) throw new Error(`unknown input id: ${id}`);
+    value.inputs[id] = input;
+  }
   for (const [id, input] of Object.entries(value.inputs)) {
     if (
       typeof input !== "string" ||

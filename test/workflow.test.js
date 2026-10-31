@@ -398,3 +398,60 @@ test("definition validates transition and join references", () => {
   assert.throws(() => validateDefinition({ id: "x", inputs: { value: "value.md" },
     steps: [{ id: "gate", kind: "decide", source: "value", max: 1, cases: [], default: "missing" }] }), /unknown default/);
 });
+
+test("runtime inputs resolve from the JSON file and survive continue and rerun", async (t) => {
+  const temp = await setup();
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const dir = path.join(temp, "workflow");
+  const data = path.join(temp, "data");
+  await mkdir(dir); await mkdir(data);
+  await writeFile(path.join(dir, "kept.md"), "default kept");
+  await writeFile(path.join(dir, "role.md"), "Read inputs");
+  await writeFile(path.join(data, "replacement.md"), "replacement content");
+  const overrides = path.join(data, "inputs.json");
+  await writeFile(overrides, JSON.stringify({ source: "replacement.md" }));
+  const wf = path.join(dir, "workflow.json");
+  await writeFile(wf, JSON.stringify({ id: "override", inputs: { source: "missing-default.md", kept: "kept.md" }, steps: [
+    { id: "read", kind: "llm", role: "role.md", route: "test", inputs: ["source", "kept"], output: "result" },
+  ] }));
+  const runs = path.join(temp, "runs");
+  run(["run", wf, "--run-id", "override", ...opts(runs), "--inputs", overrides, "--llm", "human"]);
+  let state = await loadState(path.join(runs, "override"));
+  assert.equal(state.status, "waiting-human");
+  assert.equal(state.artifacts.source.path, path.join(data, "replacement.md"));
+  assert.equal(state.artifacts.kept.path, path.join(dir, "kept.md"));
+  const prompt = await readFile(path.join(runs, "override/steps/read/v1/a1/prompt.md"), "utf8");
+  assert.match(prompt, /replacement content/); assert.match(prompt, /default kept/);
+  await rm(overrides);
+  await writeFile(path.join(runs, "override/steps/read/v1/a1/output.md"), "response");
+  run(["continue", "--run-id", "override", ...opts(runs)]);
+  state = await loadState(path.join(runs, "override"));
+  assert.equal(state.status, "completed");
+  run(["rerun", "--run-id", "override", "--from", "read", ...opts(runs)]);
+  state = await loadState(path.join(runs, "override"));
+  assert.equal(state.status, "waiting-human");
+  assert.match(await readFile(path.join(runs, "override/steps/read/v3/a1/prompt.md"), "utf8"), /replacement content/);
+});
+
+test("runtime inputs reject unknown IDs, invalid mappings, and missing paths before creating a run", async (t) => {
+  const temp = await setup();
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const wf = path.join(temp, "workflow.json");
+  await writeFile(path.join(temp, "source.md"), "source");
+  await writeFile(wf, JSON.stringify({ id: "inputs", inputs: { source: "source.md" }, steps: [] }));
+  const cases = [
+    [{ typo: "source.md" }, /unknown input id: typo/],
+    [null, /object mapping input ids to paths/],
+    [[], /object mapping input ids to paths/],
+    [{ source: 42 }, /object mapping input ids to paths/],
+    [{ source: "absent.md" }, /missing input file for source/],
+  ];
+  for (const [value, message] of cases) {
+    const file = path.join(temp, "inputs.json");
+    await writeFile(file, JSON.stringify(value));
+    const result = spawnSync(process.execPath, [cli, "run", wf, "--run-id", "invalid", ...opts(path.join(temp, "runs")), "--inputs", file], { encoding: "utf8" });
+    assert.equal(result.status, 1); assert.match(result.stderr, message);
+  }
+  assert.deepEqual((await readdir(temp)).sort(), ["inputs.json", "source.md", "workflow.json"]);
+  run(["run", wf, "--run-id", "empty", ...opts(path.join(temp, "runs")), "--inputs"], 1);
+});
