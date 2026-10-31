@@ -363,18 +363,54 @@ test("waitFor requires fresh completions on every activation and survives contin
     command("a", ["join"]), command("b", ["join"]),
     command("join", ["again"], ["a", "b"]), command("again", ["a"])]);
   const { state, definition, temp, gateway } = result;
-  assert.equal(state.status, "waiting-input");
-  assert.deepEqual(state.frontier, ["join"]);
+  assert.equal(state.status, "completed");
+  assert.deepEqual(state.frontier, []);
   assert.equal(state.steps.join.attempts, 1);
   assert.equal(state.steps.a.attempts, 2);
   assert.equal(state.steps.b.attempts, 1);
   definition.steps.find(step => step.id === "join").next = [];
-  state.frontier.push("b");
+  state.frontier.push("a", "b", "join");
   await saveState(temp, state);
   const restored = await loadState(temp);
   await schedule({ definition, definitionDir: temp, runDir: temp, state: restored, gateway, parallel: 1 });
   assert.equal(restored.status, "completed");
   assert.equal(restored.steps.join.attempts, 2);
+});
+
+test("waitFor ignores completions from before a failed join rerun", async (t) => {
+  const temp = await setup();
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const definition = { id: "flow", inputs: {}, steps: [
+    command("a", ["join"]),
+    { ...command("b", ["join"]), inputs: ["missing-input"] },
+    { ...textStep("join", [], "gate-value", ["gate"]), waitFor: ["a", "b"] },
+    { id: "gate", kind: "decide", source: "gate-value", max: 3, cases: [] },
+  ] };
+  const state = await initializeState(temp, definition, "", {});
+  state.frontier = ["a", "b", "join"];
+  state.sequence = 3;
+  state.steps.a.completedSequence = 1;
+  state.steps.b.completedSequence = 2;
+  state.steps.join.completedSequence = 1;
+  state.steps.join.startedSequence = 3;
+  await schedule({ definition, definitionDir: temp, runDir: temp, state, gateway: async () => "ok" });
+  assert.equal(state.steps.join.attempts, 0);
+  assert.equal(state.status, "waiting-input");
+  assert.deepEqual(state.frontier, ["b", "join"]);
+});
+
+test("waitFor activates a join once before advancing its decision", async (t) => {
+  const { state } = await engineRun(t, [
+    command("start", ["a", "b"]),
+    command("a", ["join"]),
+    command("b", ["join"]),
+    { ...textStep("join", [], "gate-value", ["gate"]), waitFor: ["a", "b"] },
+    { id: "gate", kind: "decide", source: "gate-value", max: 3, cases: [{ when: ["PASS"], goto: "end" }] },
+    command("end", []),
+  ], async () => "VERDICT: PASS");
+  assert.equal(state.status, "completed", state.error);
+  assert.equal(state.steps.join.attempts, 1);
+  assert.equal(state.rounds.gate, 1);
 });
 
 test("activation during execution schedules another version", async (t) => {

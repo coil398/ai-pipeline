@@ -32,7 +32,8 @@ export async function schedule(
         const record = state.steps[id];
         if (!(await allInputsExist(step, state))) continue;
         if (!(step.waitFor ?? []).every((source) =>
-          (state.steps[source].completedSequence ?? 0) > (record.completedSequence ?? 0)
+          (state.steps[source].completedSequence ?? 0) >
+            (record.startedSequence ?? record.completedSequence ?? 0)
         )) continue;
         if (step.kind === "decide") {
           if (!batch.length) batch.push(step);
@@ -45,6 +46,13 @@ export async function schedule(
         if (batch.length >= parallel) break;
       }
       if (!batch.length) {
+        state.frontier = state.frontier.filter((id) => {
+          const step = definition.steps.find((item) => item.id === id);
+          return !(step?.waitFor?.length && step.waitFor.every((source) =>
+            !state.frontier.includes(source)
+          ));
+        });
+        if (!state.frontier.length) continue;
         state.status = "waiting-input";
         break;
       }
@@ -58,6 +66,7 @@ export async function schedule(
       const outcomes = await Promise.allSettled(batch.map(async (step) => {
         if (step.kind === "decide") state.rounds[step.id]++;
         const record = state.steps[step.id];
+        record.startedSequence = ++state.sequence;
         const started = Date.now();
         log("INFO", "step_start", { run_id: state.runId, step_id: step.id, version: record.attempts + 1 });
         try {
