@@ -1,0 +1,13 @@
+{
+  "planning": [
+    { "gateway": "example-api", "model": "example-model", "effort": "medium" },
+    { "gateway": "example-cli", "model": "example-model", "effort": "medium" }
+  ],
+  "review": [
+    { "gateway": "example-api", "model": "example-model", "effort": "high" },
+    { "gateway": "example-cli", "model": "example-model", "effort": "high" }
+  ],
+  "coding-agent": [
+    { "gateway": "example-cli", "model": "example-model", "effort": "high" }
+  ]
+}

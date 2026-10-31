@@ -1,0 +1,10 @@
+{
+  "fast": [
+    { "gateway": "example-api", "model": "example-model", "effort": "medium" },
+    { "gateway": "example-cli", "model": "example-model", "effort": "medium" }
+  ],
+  "quality": [
+    { "gateway": "example-api", "model": "example-model", "effort": "high" },
+    { "gateway": "example-cli", "model": "example-model", "effort": "high" }
+  ]
+}

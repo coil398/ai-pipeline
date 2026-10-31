@@ -1,0 +1,4 @@
+{
+  "example-api": { "kind": "openai-chat", "baseUrl": "http://localhost:1234/v1", "apiKeyEnv": "EXAMPLE_API_KEY", "cooldownMs": 3600000 },
+  "example-cli": { "kind": "exec", "argv": ["node", "example-cli.js", "{model}", "{effort}"], "limitPatterns": ["usage limit"] }
+}

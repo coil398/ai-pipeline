@@ -4,7 +4,16 @@
     "checkJs": true,
     "noEmit": true,
     "module": "nodenext",
-    "target": "es2022"
+    "target": "es2022",
+    "types": [],
+    "lib": [
+      "ES2022",
+      "DOM"
+    ]
   },
-  "include": ["bin/**/*.js", "src/**/*.js"]
+  "include": [
+    "bin/**/*.js",
+    "src/**/*.js",
+    "src/**/*.d.ts"
+  ]
 }
