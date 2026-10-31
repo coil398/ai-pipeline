@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 
-/** @param {{baseUrl:string, apiKeyEnv:string, envFile?:string, timeoutMs?:number}} gateway @param {{model:string, effort?:string, prompt:string}} request @returns {Promise<{text:string, usage:{inputTokens:number,outputTokens:number,totalTokens:number}}>} */
+/** @param {{baseUrl:string, apiKeyEnv:string, envFile?:string, timeoutMs?:number, headers?:Record<string,string>}} gateway @param {{model:string, effort?:string, prompt:string}} request @returns {Promise<{text:string, usage:{inputTokens:number,outputTokens:number,totalTokens:number}}>} */
 export async function openaiChat(gateway, request) {
   const apiKey = gateway.apiKeyEnv
     ? process.env[gateway.apiKeyEnv] ||
@@ -13,6 +14,7 @@ export async function openaiChat(gateway, request) {
   const timer = gateway.timeoutMs
     ? setTimeout(() => controller.abort(), gateway.timeoutMs)
     : undefined;
+  const requestId = randomUUID();
   try {
     const response = await fetch(
       `${gateway.baseUrl.replace(/\/$/, "")}/chat/completions`,
@@ -23,6 +25,12 @@ export async function openaiChat(gateway, request) {
           ...(apiKey
             ? { authorization: `Bearer ${apiKey}` }
             : {}),
+          ...Object.fromEntries(
+            Object.entries(gateway.headers ?? {}).map(([name, value]) => [
+              name,
+              value.replaceAll("{requestId}", requestId),
+            ]),
+          ),
         },
         body: JSON.stringify({
           model: request.model,
@@ -39,7 +47,15 @@ export async function openaiChat(gateway, request) {
       error.retryAfterMs = retryAfter(response.headers.get("retry-after"));
       throw error;
     }
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok) {
+      const responseText = (await response.text()).slice(0, 500);
+      const safeResponseText = apiKey
+        ? responseText.replaceAll(apiKey, "[REDACTED]")
+        : responseText;
+      throw new Error(
+        `HTTP ${response.status}${safeResponseText ? `: ${safeResponseText}` : ""}`,
+      );
+    }
     const body = await response.json();
     const usage = body.usage ?? {};
     return {

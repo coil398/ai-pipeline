@@ -9,6 +9,60 @@ import { spawn } from "node:child_process";
 const root = path.resolve(".");
 const cli = path.join(root, "bin/aip.js");
 const tempRoot = () => mkdtemp(path.join(os.tmpdir(), "aip-llm-"));
+test("openai chat applies configured headers with a fresh requestId per request", async () => {
+  const { openaiChat } = await import("../src/llm/gateways/openai-chat.js");
+  const priorFetch = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (_url, options) => {
+    seen.push(options.headers);
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  try {
+    const gateway = {
+      baseUrl: "http://example.invalid",
+      headers: { "x-opencode-session": "{requestId}", "x-request-copy": "id={requestId}" },
+    };
+    await openaiChat(gateway, { model: "m", prompt: "p" });
+    await openaiChat(gateway, { model: "m", prompt: "p" });
+    const firstId = seen[0]["x-opencode-session"];
+    const secondId = seen[1]["x-opencode-session"];
+    assert.match(firstId, /^[0-9a-f-]{36}$/i);
+    assert.match(secondId, /^[0-9a-f-]{36}$/i);
+    assert.notEqual(firstId, secondId);
+    assert.equal(seen[0]["x-request-copy"], `id=${firstId}`);
+    assert.equal(seen[1]["x-request-copy"], `id=${secondId}`);
+  } finally {
+    globalThis.fetch = priorFetch;
+  }
+});
+test("openai chat includes an error response body without exposing the API key", async () => {
+  const { openaiChat } = await import("../src/llm/gateways/openai-chat.js");
+  const priorFetch = globalThis.fetch;
+  const priorKey = process.env.TEST_ERROR_BODY_KEY;
+  process.env.TEST_ERROR_BODY_KEY = "error-secret";
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 400,
+    text: async () => "MissingSessionID; attempted key=error-secret",
+  });
+  try {
+    await assert.rejects(
+      openaiChat(
+        { baseUrl: "http://example.invalid", apiKeyEnv: "TEST_ERROR_BODY_KEY" },
+        { model: "m", prompt: "p" },
+      ),
+      (error) => {
+        assert.equal(error.message, "HTTP 400: MissingSessionID; attempted key=[REDACTED]");
+        assert.equal(error.message.includes("error-secret"), false);
+        return true;
+      },
+    );
+  } finally {
+    if (priorKey === undefined) delete process.env.TEST_ERROR_BODY_KEY;
+    else process.env.TEST_ERROR_BODY_KEY = priorKey;
+    globalThis.fetch = priorFetch;
+  }
+});
 test("openai chat rejects an empty API key before fetch", async () => {
   const { openaiChat } = await import("../src/llm/gateways/openai-chat.js");
   const priorKey = process.env.TEST_EMPTY_KEY;
