@@ -1,12 +1,12 @@
 import path from "node:path";
 import { readText } from "../io/files.js";
 
-/** @param {{role: string, inputs?: string[], output: string}} step @param {Record<string, string>} inputs @param {string} definitionDir @returns {Promise<any>} */
+/** @param {{role: string, inputs?: string[], optionalInputs?: string[], output: string}} step @param {Record<string, string>} inputs @param {string} definitionDir @returns {Promise<any>} */
 export async function renderPrompt(step, inputs, definitionDir) {
   const role = await readText(path.resolve(definitionDir, step.role));
   const blocks = [`${role.trimEnd()}`, "# Inputs"];
-  for (const input of step.inputs ?? []) {
-    blocks.push(`## ${input}\n${inputs[input]}`);
+  for (const input of new Set([...(step.inputs ?? []), ...(step.optionalInputs ?? [])])) {
+    if (Object.hasOwn(inputs, input)) blocks.push(`## ${input}\n${inputs[input]}`);
   }
   blocks.push(`# Output\n${step.output}`);
   return `${blocks.join("\n\n")}\n`;

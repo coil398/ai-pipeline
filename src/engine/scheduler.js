@@ -135,6 +135,12 @@ async function execute(
   for (const id of step.inputs ?? []) {
     inputs[id] = await readText(state.artifacts[id].path);
   }
+  for (const id of step.optionalInputs ?? []) {
+    if (!Object.hasOwn(inputs, id) && state.artifacts[id] &&
+      await exists(state.artifacts[id].path)) {
+      inputs[id] = await readText(state.artifacts[id].path);
+    }
+  }
   record.status = "running";
   await saveState(runDir, state);
   if (step.kind === "llm") {
@@ -187,7 +193,7 @@ async function execute(
       inputs: {},
       outputs: {},
     };
-    for (const id of step.inputs ?? []) {
+    for (const id of Object.keys(inputs)) {
       manifest.inputs[id] = {
         path: state.artifacts[id].path,
         previous: await previousArtifactPaths(runDir, id, definition),

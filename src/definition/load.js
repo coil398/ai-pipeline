@@ -3,7 +3,7 @@ import { exists, readJson } from "../io/files.js";
 
 const process = /** @type {any} */ (globalThis).process;
 
-/** @typedef {{ id: string, kind: 'llm'|'exec'|'decide', inputs?: string[], role?: string, route?: string, output?: string, outputs?: string[], argv?: string[], component?: string, source?: string, field?: string, cases?: Array<{when: string[], goto: string}>, max?: number, next?: string[], waitFor?: string[], default?: string }} WorkflowStep */
+/** @typedef {{ id: string, kind: 'llm'|'exec'|'decide', inputs?: string[], optionalInputs?: string[], role?: string, route?: string, output?: string, outputs?: string[], argv?: string[], component?: string, source?: string, field?: string, cases?: Array<{when: string[], goto: string}>, max?: number, next?: string[], waitFor?: string[], default?: string }} WorkflowStep */
 /** @typedef {{ id: string, inputs: Record<string, string>, components?: string, steps: WorkflowStep[] }} Workflow */
 
 /** @param {string} file @param {Record<string, string>} [inputOverrides] @param {{componentsDir?: string}} [options] @returns {Promise<{definition: Workflow, file: string, directory: string}>} */
@@ -69,11 +69,12 @@ export function validateDefinition(definition) {
     if (!["llm", "exec", "decide"].includes(step.kind)) {
       throw new Error(`invalid kind for ${step.id}`);
     }
-    if (
-      step.inputs !== undefined &&
-      (!Array.isArray(step.inputs) ||
-        step.inputs.some((input) => typeof input !== "string"))
-    ) throw new Error(`invalid inputs for ${step.id}`);
+    for (const key of ["inputs", "optionalInputs"]) {
+      if (step[key] !== undefined && (!Array.isArray(step[key]) ||
+        step[key].some((input) => typeof input !== "string"))) {
+        throw new Error(`invalid ${key} for ${step.id}`);
+      }
+    }
   }
   const artifacts = new Set(Object.keys(definition.inputs));
   for (const step of definition.steps) {
@@ -85,7 +86,7 @@ export function validateDefinition(definition) {
     ) artifacts.add(output);
   }
   for (const step of definition.steps) {
-    for (const input of step.inputs ?? []) {
+    for (const input of [...(step.inputs ?? []), ...(step.optionalInputs ?? [])]) {
       if (!artifacts.has(input)) {
         throw new Error(`unresolved input ${input} in ${step.id}`);
       }

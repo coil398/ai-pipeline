@@ -13,6 +13,8 @@ node bin/aip.js rerun --run-id sample --from critic --runs-dir /tmp/aip-runs
 
 Execution starts at the first step. Each completed step activates its `next` targets; omitting `next` activates the next step in the array, and `next: []` ends that path. A `decide` activates the first matching case's `goto`, or its optional `default`. Each decision's `max` limits its total executions. `inputs` and `output` / `outputs` carry artifacts. `waitFor` joins paths by requiring fresh completions from all listed steps.
 
+`optionalInputs` lists artifact IDs to include in the prompt or exec manifest only when their current files exist, without waiting for them. Listing a step's own output passes its previous value on subsequent executions.
+
 The engine saves the pending set (`frontier`), decision counts, step execution counts, and current artifacts after each step completes. `continue` resumes that frontier. `rerun --from <step>` starts with only that step pending and resets all decision counts, preserving artifacts and step versions. `render` shows a compact text view. `--parallel <n>` limits concurrent steps, together with gateway `maxParallel` limits. See [the definition guide](docs/definition.md), [review-loop](examples/review-loop/workflow.json), and [design-change](examples/design-change/workflow.json).
 
 Use `--llm <fixture-directory>`, `--llm human`, or `--llm run:<run-id>` for fixture responses, human responses, or replay from another run. Run checks with `npm test` (`node --test`).
