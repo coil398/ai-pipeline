@@ -9,6 +9,31 @@ import { spawn } from "node:child_process";
 const root = path.resolve(".");
 const cli = path.join(root, "bin/aip.js");
 const tempRoot = () => mkdtemp(path.join(os.tmpdir(), "aip-llm-"));
+test("openai chat rejects an empty API key before fetch", async () => {
+  const { openaiChat } = await import("../src/llm/gateways/openai-chat.js");
+  const priorKey = process.env.TEST_EMPTY_KEY;
+  const priorFetch = globalThis.fetch;
+  let calls = 0;
+  process.env.TEST_EMPTY_KEY = "";
+  globalThis.fetch = async () => {
+    calls += 1;
+    throw new Error("fetch should not be called");
+  };
+  try {
+    await assert.rejects(
+      openaiChat(
+        { baseUrl: "http://example.invalid", apiKeyEnv: "TEST_EMPTY_KEY" },
+        { model: "m", prompt: "p" },
+      ),
+      /missing API key environment variable: TEST_EMPTY_KEY/,
+    );
+    assert.equal(calls, 0);
+  } finally {
+    if (priorKey === undefined) delete process.env.TEST_EMPTY_KEY;
+    else process.env.TEST_EMPTY_KEY = priorKey;
+    globalThis.fetch = priorFetch;
+  }
+});
 function run(args, env, expected = 0) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [cli, ...args], {
@@ -108,7 +133,7 @@ test("429 advances route, records cooldown and tried route usage", async (t) => 
     "switch",
     "--runs-dir",
     runs,
-  ], { AIP_COOLDOWN_PATH: cooldown });
+  ], { AIP_COOLDOWN_PATH: cooldown, TEST_KEY: "test-key" });
   const usage = JSON.parse(
     await readFile(
       path.join(runs, "switch/steps/respond/v1/a1/usage.json"),
@@ -258,14 +283,16 @@ test("5xx fails run and continue retries the same step", async (t) => {
       "--runs-dir",
       runs,
     ],
-    {},
+    { TEST_KEY: "test-key" },
     1,
   );
   let state = JSON.parse(
     await readFile(path.join(runs, "retry/state.json"), "utf8"),
   );
   assert.equal(state.status, "failed");
-  await run(["continue", "--run-id", "retry", "--runs-dir", runs]);
+  await run(["continue", "--run-id", "retry", "--runs-dir", runs], {
+    TEST_KEY: "test-key",
+  });
   state = JSON.parse(
     await readFile(path.join(runs, "retry/state.json"), "utf8"),
   );

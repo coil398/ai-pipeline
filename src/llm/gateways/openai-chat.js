@@ -1,5 +1,9 @@
 /** @param {{baseUrl:string, apiKeyEnv:string, timeoutMs?:number}} gateway @param {{model:string, effort?:string, prompt:string}} request @returns {Promise<{text:string, usage:{inputTokens:number,outputTokens:number,totalTokens:number}}>} */
 export async function openaiChat(gateway, request) {
+  const apiKey = gateway.apiKeyEnv ? process.env[gateway.apiKeyEnv] : undefined;
+  if (gateway.apiKeyEnv && !apiKey) {
+    throw new Error(`missing API key environment variable: ${gateway.apiKeyEnv}`);
+  }
   const controller = new AbortController();
   const timer = gateway.timeoutMs
     ? setTimeout(() => controller.abort(), gateway.timeoutMs)
@@ -11,8 +15,8 @@ export async function openaiChat(gateway, request) {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          ...(process.env[gateway.apiKeyEnv]
-            ? { authorization: `Bearer ${process.env[gateway.apiKeyEnv]}` }
+          ...(apiKey
+            ? { authorization: `Bearer ${apiKey}` }
             : {}),
         },
         body: JSON.stringify({
