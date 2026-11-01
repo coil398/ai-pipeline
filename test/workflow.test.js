@@ -56,6 +56,109 @@ test("review loop passes FAIL to revise and completes on PASS", async (t) => {
     /VERDICT: FAIL/,
   );
 });
+test("map validates nested ids, inputs, and control flow", () => {
+  const base = { id: "map-flow", inputs: { parts: "parts.json", draft: "draft.md" }, steps: [
+    { id: "map", kind: "map", items: "parts", itemArtifact: "part", output: "plans", steps: [
+      { id: "prep", kind: "exec", argv: ["node", "prep.mjs"], inputs: ["draft", "part"], outputs: ["prompt"] },
+      { id: "check", kind: "llm", role: "check.md", route: "r", inputs: ["prompt"], output: "plan" },
+    ] },
+    { id: "merge", kind: "exec", argv: ["node", "merge.mjs"], inputs: ["plans"], outputs: [] },
+  ] };
+  assert.doesNotThrow(() => validateDefinition(base));
+  assert.throws(() => validateDefinition({ ...base, steps: [{ ...base.steps[0], steps: [base.steps[0].steps[0], { ...base.steps[0].steps[1], id: "prep" }] }, base.steps[1]] }), /duplicate step id/);
+  assert.throws(() => validateDefinition({ ...base, steps: [{ ...base.steps[0], steps: [{ ...base.steps[0].steps[0], inputs: ["missing"] }] }, base.steps[1]] }), /unresolved input/);
+  assert.throws(() => validateDefinition({ ...base, steps: [{ ...base.steps[0], steps: [{ ...base.steps[0].steps[0], next: [] }] }, base.steps[1]] }), /control flow/);
+});
+async function runMap(t, values, options = {}) {
+  const temp = await setup();
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const itemFile = path.join(temp, "items.json");
+  await writeFile(itemFile, JSON.stringify(values));
+  const definition = {
+    id: "map-test",
+    inputs: { items: "items.json" },
+    steps: [{
+      id: "map",
+      kind: "map",
+      items: "items",
+      itemArtifact: "item",
+      output: "results",
+      maxConcurrency: options.maxConcurrency,
+      steps: [
+        {
+          id: "prepare",
+          kind: "exec",
+          argv: ["node", "-e", 'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.env.AIP_MANIFEST));const x=JSON.parse(fs.readFileSync(m.inputs.item.path));fs.writeFileSync(m.outputs.prompt,String(x))'],
+          inputs: ["item"],
+          outputs: ["prompt"],
+        },
+        { id: "render", kind: "llm", role: "role.md", route: "local", inputs: ["prompt"], output: "rendered" },
+      ],
+    }],
+  };
+  await writeFile(path.join(temp, "role.md"), "Render {{prompt}}");
+  const state = await initializeState(temp, definition, "", { items: itemFile });
+  const calls = [];
+  let active = 0;
+  let peak = 0;
+  const gateway = async ({ prompt }) => {
+    active += 1;
+    peak = Math.max(peak, active);
+    calls.push(prompt);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    active -= 1;
+    if (options.failOnce && prompt.includes(String(options.failOnce)) && !options.failed) {
+      options.failed = true;
+      throw new Error("fixture failure");
+    }
+    return `result:${prompt.match(/## prompt\n([^\n]+)/)[1]}`;
+  };
+  await schedule({ definition, definitionDir: temp, runDir: temp, state, gateway, parallel: 4 });
+  return { temp, state, definition, gateway, calls, peak, itemFile };
+}
+test("map runs exec then llm for each item and preserves input order", async (t) => {
+  const { state, calls } = await runMap(t, ["a", "b", "c"]);
+  assert.equal(state.status, "completed", state.error);
+  assert.deepEqual(JSON.parse(await readFile(state.artifacts.results.path, "utf8")), [
+    "result:a", "result:b", "result:c",
+  ]);
+  assert.equal(calls.length, 3);
+});
+test("map returns an empty array for empty items", async (t) => {
+  const { state, calls } = await runMap(t, []);
+  assert.equal(state.status, "completed", state.error);
+  assert.deepEqual(JSON.parse(await readFile(state.artifacts.results.path, "utf8")), []);
+  assert.equal(calls.length, 0);
+});
+test("map maxConcurrency limits active iterations", async (t) => {
+  const { state, peak } = await runMap(t, [1, 2, 3], { maxConcurrency: 1 });
+  assert.equal(state.status, "completed", state.error);
+  assert.equal(peak, 1);
+});
+test("map continue retries only failed iterations", async (t) => {
+  const result = await runMap(t, [1, 2, 3], { failOnce: 2 });
+  assert.equal(result.state.status, "failed");
+  assert.deepEqual(result.state.frontier, ["map"]);
+  const before = result.calls.length;
+  await schedule({ definition: result.definition, definitionDir: result.temp, runDir: result.temp, state: result.state, gateway: result.gateway });
+  assert.equal(result.state.status, "completed", result.state.error);
+  assert.equal(result.state.steps.map.attempts, 1);
+  assert.equal(result.calls.length - before, 1);
+  assert.deepEqual(JSON.parse(await readFile(result.state.artifacts.results.path, "utf8")), [
+    "result:1", "result:2", "result:3",
+  ]);
+});
+test("completed map reached again uses a new version and reruns all items", async (t) => {
+  const result = await runMap(t, ["x", "y"]);
+  assert.equal(result.state.status, "completed", result.state.error);
+  result.state.frontier = ["map"];
+  const before = result.calls.length;
+  await schedule({ definition: result.definition, definitionDir: result.temp, runDir: result.temp, state: result.state, gateway: result.gateway });
+  assert.equal(result.state.status, "completed", result.state.error);
+  assert.equal(result.state.steps.map.attempts, 2);
+  assert.equal(result.calls.length - before, 2);
+  assert.ok(await readFile(path.join(result.temp, "steps/map/v2/items/0/render/a1/output.md"), "utf8"));
+});
 test("max rounds stops and rerun resets the loop", async (t) => {
   const temp = await setup();
   t.after(() => rm(temp, { recursive: true, force: true }));

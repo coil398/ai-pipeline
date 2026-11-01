@@ -42,6 +42,10 @@ export async function loadDefinition(file, inputOverrides = {}, options = {}) {
         throw new Error(`missing file for ${step.id}: ${ref}`);
       }
     }
+    for (const inner of step.steps ?? []) {
+      if (inner.role && !await exists(path.resolve(path.dirname(absolute), inner.role))) throw new Error(`missing role file for ${inner.id}: ${inner.role}`);
+      for (const ref of inner.argv ?? []) if (typeof ref === "string" && (ref.includes("/") || ref.startsWith(".")) && !await exists(path.resolve(path.dirname(absolute), ref))) throw new Error(`missing file for ${inner.id}: ${ref}`);
+    }
   }
   return {
     definition: value,
@@ -66,7 +70,7 @@ export function validateDefinition(definition) {
       throw new Error(`invalid or duplicate step id: ${step?.id}`);
     }
     ids.add(step.id);
-    if (!["llm", "exec", "decide"].includes(step.kind)) {
+    if (!["llm", "exec", "decide", "map"].includes(step.kind)) {
       throw new Error(`invalid kind for ${step.id}`);
     }
     for (const key of ["inputs", "optionalInputs"]) {
@@ -84,6 +88,36 @@ export function validateDefinition(definition) {
         ...(step.outputs ?? []),
       ]
     ) artifacts.add(output);
+  }
+  for (const step of definition.steps.filter((item) => item.kind === "map")) {
+    if (typeof step.items !== "string" || !artifacts.has(step.items) ||
+      typeof step.itemArtifact !== "string" || !Array.isArray(step.steps) ||
+      !step.steps.length || typeof step.output !== "string" ||
+      (step.maxConcurrency !== undefined && (!Number.isInteger(step.maxConcurrency) || step.maxConcurrency < 1))) {
+      throw new Error(`invalid map: ${step.id}`);
+    }
+    const innerIds = new Set();
+    const visible = new Set([...Object.keys(definition.inputs), step.itemArtifact]);
+    const innerOutputs = new Set();
+    for (const inner of step.steps) {
+      if (!inner || typeof inner.id !== "string" || ids.has(inner.id) || innerIds.has(inner.id)) throw new Error(`invalid or duplicate step id: ${inner?.id}`);
+      innerIds.add(inner.id);
+      if (!["exec", "llm"].includes(inner.kind)) throw new Error(`invalid kind for ${inner.id}`);
+      if (inner.next !== undefined || inner.waitFor !== undefined || inner.goto !== undefined) throw new Error(`invalid inner control flow: ${inner.id}`);
+      for (const key of ["inputs", "optionalInputs"]) {
+        if (inner[key] !== undefined && (!Array.isArray(inner[key]) || inner[key].some((v) => typeof v !== "string"))) throw new Error(`invalid ${key} for ${inner.id}`);
+        for (const input of inner[key] ?? []) if (!visible.has(input)) throw new Error(`unresolved input ${input} in ${inner.id}`);
+      }
+      if (inner.kind === "llm") {
+        if (typeof inner.role !== "string" || typeof inner.route !== "string" || typeof inner.output !== "string") throw new Error(`llm requires role, route, and output: ${inner.id}`);
+        visible.add(inner.output); innerOutputs.add(inner.output);
+      } else {
+        if ((inner.argv === undefined) === (inner.component === undefined) || (inner.argv !== undefined && (!Array.isArray(inner.argv) || !inner.argv.length || inner.argv.some((v) => typeof v !== "string"))) || !Array.isArray(inner.outputs) || inner.outputs.some((v) => typeof v !== "string")) throw new Error(`exec requires exactly one of argv or component, and outputs: ${inner.id}`);
+        for (const output of inner.outputs) { visible.add(output); innerOutputs.add(output); }
+      }
+    }
+    for (const id of innerIds) ids.add(id);
+    artifacts.add(step.output);
   }
   for (const step of definition.steps) {
     for (const input of [...(step.inputs ?? []), ...(step.optionalInputs ?? [])]) {

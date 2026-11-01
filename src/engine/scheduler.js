@@ -39,7 +39,7 @@ export async function schedule(
           if (!batch.length) batch.push(step);
           break;
         }
-        const outputs = step.outputs ?? [step.output];
+        const outputs = step.kind === "map" ? [step.output] : step.outputs ?? [step.output];
         if (outputs.some((output) => claimedOutputs.has(output))) continue;
         batch.push(step);
         for (const output of outputs) claimedOutputs.add(output);
@@ -77,7 +77,7 @@ export async function schedule(
         const started = Date.now();
         log("INFO", "step_start", { run_id: state.runId, step_id: step.id, version: record.attempts + 1 });
         try {
-          await execute({ step, definition, definitionDir, runDir, state, gateway, selectedCase });
+          await execute({ step, definition, definitionDir, runDir, state, gateway, selectedCase, parallel });
           record.status = "completed";
           record.completedAt = new Date().toISOString();
           record.completedSequence = ++state.sequence;
@@ -122,6 +122,7 @@ async function allInputsExist(step, state) {
     const input of [
       ...(step.inputs ?? []),
       ...(step.kind === "decide" ? [step.source] : []),
+      ...(step.kind === "map" ? [step.items] : []),
     ]
   ) {
     if (
@@ -131,10 +132,15 @@ async function allInputsExist(step, state) {
   return true;
 }
 async function execute(
-  { step, definition, definitionDir, runDir, state, gateway, selectedCase },
+  { step, definition, definitionDir, runDir, state, gateway, selectedCase, parallel = 4 },
 ) {
   const record = state.steps[step.id];
-  const version = ++record.attempts;
+  const version = step.kind === "map" && ["failed", "running"].includes(record.status) && record.attempts ? record.attempts : ++record.attempts;
+  if (step.kind === "map") {
+    record.status = "running";
+    await saveState(runDir, state);
+    return executeMap({ step, version, definition, definitionDir, runDir, state, gateway, parallel });
+  }
   const dir = attemptDir(runDir, step, version);
   await ensureDir(dir);
   /** @type {Record<string, string>} */
@@ -150,6 +156,41 @@ async function execute(
   }
   record.status = "running";
   await saveState(runDir, state);
+  await executeWork({
+    step,
+    dir,
+    version,
+    runDir,
+    definition,
+    definitionDir,
+    inputs,
+    resolveInputPath: (id) => state.artifacts[id].path,
+    outputPath: (id) => path.join(runDir, "artifacts", id),
+    state,
+    gateway,
+  });
+  if (step.kind === "decide") {
+    const selected = selectedCase?.goto ?? step.default;
+    if (!selected) throw new Error(`no matching case in ${step.id} and no default`);
+    record.selected = selected;
+  }
+}
+
+async function executeWork({
+  step,
+  dir,
+  version,
+  runDir,
+  definition,
+  definitionDir,
+  inputs,
+  resolveInputPath,
+  outputPath,
+  recordArtifacts = true,
+  isMapInner = false,
+  state,
+  gateway,
+}) {
   if (step.kind === "llm") {
     const prompt = await renderPrompt(step, inputs, definitionDir);
     await writeFile(path.join(dir, "prompt.md"), prompt);
@@ -184,14 +225,16 @@ async function execute(
       totalTokens: result.usage?.totalTokens ?? 0,
       tried: result.tried ?? [{ gateway: "human", result: "success" }],
     });
-    const current = path.join(runDir, "artifacts", step.output);
+    const current = outputPath(step.output);
     await ensureDir(path.dirname(current));
     await copyFile(path.join(dir, "output.md"), current);
-    state.artifacts[step.output] = {
-      path: current,
-      producer: step.id,
-      version,
-    };
+    if (recordArtifacts) {
+      state.artifacts[step.output] = {
+        path: current,
+        producer: step.id,
+        version,
+      };
+    }
   } else if (step.kind === "exec") {
     const manifest = {
       runId: state.runId,
@@ -202,8 +245,10 @@ async function execute(
     };
     for (const id of Object.keys(inputs)) {
       manifest.inputs[id] = {
-        path: state.artifacts[id].path,
-        previous: await previousArtifactPaths(runDir, id, definition),
+        path: resolveInputPath(id),
+        previous: isMapInner
+          ? []
+          : await previousArtifactPaths(runDir, id, definition),
       };
     }
     for (const id of step.outputs) {
@@ -224,16 +269,103 @@ async function execute(
       if (!await exists(manifest.outputs[id])) {
         throw new Error(`exec output missing: ${id}`);
       }
-      const current = path.join(runDir, "artifacts", id);
+      const current = outputPath(id);
       await ensureDir(path.dirname(current));
       await copyFile(manifest.outputs[id], current);
-      state.artifacts[id] = { path: current, producer: step.id, version };
+      if (recordArtifacts) {
+        state.artifacts[id] = { path: current, producer: step.id, version };
+      }
     }
-  } else {
-    const selected = selectedCase?.goto ?? step.default;
-    if (!selected) throw new Error(`no matching case in ${step.id} and no default`);
-    record.selected = selected;
   }
+}
+async function executeMap({ step, version, definition, definitionDir, runDir, state, gateway, parallel }) {
+  const values = JSON.parse(await readText(state.artifacts[step.items].path));
+  if (!Array.isArray(values)) throw new Error(`map items is not an array: ${step.items}`);
+  const root = path.join(runDir, "steps", step.id, `v${version}`, "items");
+  const results = new Array(values.length);
+  let cursor = 0;
+  let firstError;
+  const worker = async () => {
+    while (!firstError) {
+      const index = cursor++;
+      if (index >= values.length) return;
+      const itemRoot = path.join(root, String(index));
+      const last = step.steps.at(-1);
+      const lastOutput = path.join(
+        itemRoot,
+        last.id,
+        "a1",
+        last.kind === "llm" ? "output.md" : "outputs",
+        ...(last.kind === "llm" ? [] : [last.outputs.at(-1)]),
+      );
+      const started = Date.now();
+      if (await exists(lastOutput)) {
+        results[index] = await readText(lastOutput);
+        continue;
+      }
+      log("INFO", "map_item_start", { run_id: state.runId, step_id: step.id, index });
+      try {
+        const artifacts = {
+          [step.itemArtifact]: {
+            path: path.join(itemRoot, "artifacts", step.itemArtifact),
+          },
+        };
+        await ensureDir(path.dirname(artifacts[step.itemArtifact].path));
+        await writeFile(artifacts[step.itemArtifact].path, JSON.stringify(values[index]));
+        for (const inner of step.steps) {
+          const innerDir = path.join(itemRoot, inner.id, "a1");
+          await ensureDir(innerDir);
+          const inputs = {};
+          const resolveInputPath = (id) =>
+            artifacts[id]?.path ?? state.artifacts[id].path;
+          for (const id of inner.inputs ?? []) {
+            inputs[id] = await readText(resolveInputPath(id));
+          }
+          for (const id of inner.optionalInputs ?? []) {
+            const artifact = artifacts[id] ?? state.artifacts[id];
+            if (!Object.hasOwn(inputs, id) && artifact && await exists(artifact.path)) {
+              inputs[id] = await readText(artifact.path);
+            }
+          }
+          await executeWork({
+            step: inner,
+            dir: innerDir,
+            version: 1,
+            runDir,
+            definition,
+            definitionDir,
+            inputs,
+            resolveInputPath,
+            outputPath: (id) => path.join(itemRoot, "artifacts", id),
+            recordArtifacts: false,
+            isMapInner: true,
+            state,
+            gateway,
+          });
+          for (const id of inner.kind === "llm" ? [inner.output] : inner.outputs) {
+            artifacts[id] = { path: path.join(itemRoot, "artifacts", id) };
+          }
+        }
+        results[index] = await readText(lastOutput);
+        log("INFO", "map_item_done", { run_id: state.runId, step_id: step.id, index, inner_step_id: last.id, elapsed_ms: Date.now() - started });
+      } catch (error) {
+        firstError ??= error;
+        log("ERROR", "map_item_failed", {
+          run_id: state.runId,
+          step_id: step.id,
+          index,
+          elapsed_ms: Date.now() - started,
+          reason: error.message,
+        });
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(step.maxConcurrency ?? parallel, values.length) }, worker));
+  if (firstError) throw firstError;
+  const current = path.join(runDir, "artifacts", step.output);
+  await ensureDir(path.dirname(current));
+  await writeFile(current, JSON.stringify(results));
+  state.artifacts[step.output] = { path: current, producer: step.id, version };
 }
 async function previousArtifactPaths(runDir, id, definition) {
   const producers = definition.steps.filter((step) =>

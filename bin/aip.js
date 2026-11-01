@@ -162,8 +162,9 @@ async function runLoaded(loaded, runDir, state, parallel) {
       llmMode.slice(4),
       "steps",
     );
-    gateway = async ({ step, version }) => {
-      const file = path.join(source, step.id, `v${version}`, "a1", "output.md");
+    gateway = async ({ step, version, dir }) => {
+      const relative = path.relative(runDir, dir);
+      const file = path.join(source, relative, "output.md");
       if (!await exists(file)) {
         throw new Error(`stopped: fixture-missing ${file}`);
       }
