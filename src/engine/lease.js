@@ -19,6 +19,13 @@ export async function acquireLease(file) {
       if (current.host === owner.host && Number.isInteger(current.pid)) {
         try {
           process.kill(current.pid, 0);
+          // /proc is optional; retain the kill(pid, 0) result when unavailable.
+          const stat = await readFile(`/proc/${current.pid}/stat`, "utf8").catch(() => "");
+          const commandEnd = stat.lastIndexOf(")");
+          if (commandEnd !== -1 && stat.slice(commandEnd + 1).trimStart().startsWith("Z ")) {
+            await unlink(file);
+            return acquireLease(file);
+          }
         } catch (probe) {
           if (probe.code === "ESRCH") {
             await unlink(file);
