@@ -24,6 +24,32 @@ When the frontier is empty, the run is `completed`. If pending steps cannot exec
 - `exec`: exactly one of `argv` or `component`, plus `inputs` and `outputs`. The process receives `AIP_MANIFEST`, a JSON file containing run and step ids, version, input paths with previous versions, and output paths.
 - `decide`: `source`, `cases` containing `when` arrays, `goto` IDs, and an optional positive integer `max`, plus an optional `default` ID. A decide-level `max` is rejected. Text values are read from a `## VERDICT` section or a `VERDICT:` line. An optional `field` reads a dotted JSON field instead. Cases are evaluated in order; the first matching case activates its `goto`. Without a match, `default` is activated. If neither applies, the run fails with a reason. A decide uses only `goto` / `default` for transitions; its `next` is ignored.
 
+### Map steps
+
+A `map` step reads JSON from its `items` artifact, which must contain an array. For each element it runs the ordered inner `steps` with that element available under `itemArtifact`, then writes the last inner step's text output as the corresponding element of a JSON array at `output`. Inner steps may be `llm` or `exec`; they cannot define workflow transitions or joins. Outer workflow inputs are visible to inner steps, and inner outputs can be passed to later inner steps. `maxConcurrency` optionally limits item concurrency; otherwise `--parallel` is used. A failed map item fails the map step. On retry, completed item outputs already present in the map version are reused.
+
+```json
+{
+  "id": "summarize-items",
+  "inputs": { "items": "items.json" },
+  "steps": [{
+    "id": "summarize",
+    "kind": "map",
+    "items": "items",
+    "itemArtifact": "item",
+    "output": "summaries",
+    "steps": [{
+      "id": "one-summary",
+      "kind": "llm",
+      "role": "roles/summarizer.md",
+      "route": "default",
+      "inputs": ["item"],
+      "output": "summary"
+    }]
+  }]
+}
+```
+
 Selecting a case with `max` increments `rounds[<step id>][<zero-based case index>]`. Before a selection would exceed that case's `max`, the engine stops with `stopped: max-rounds`, leaving the decide pending and its count unchanged. Cases without `max` and the default transition are not counted. Saved numeric decision counts from older states are discarded on load; case counts start at zero. All transitions use the same activation rules, including transitions to a previously executed step. Repeated execution creates a new version; each artifact's current value is the most recent write.
 
 ```json
@@ -41,7 +67,7 @@ Selecting a case with `max` increments `rounds[<step id>][<zero-based case index
 
 ## Run files and resumption
 
-A run stores `state.json`, `run.lease`, step versions under `steps/<step>/v<N>/a1/`, and current artifact files under `artifacts/<id>`. Each execution attempt gets a new version, including retries after failure or human waiting. State saves the frontier, rounds, artifacts, execution counts (`steps[id].attempts`), and completion sequence numbers after each step completes. Concurrent state writes are serialized.
+A run directory is `<runs-dir>/<run-id>`. It stores `state.json`, a `run.lease` file while a CLI operation owns the run, step versions under `steps/<step>/v<N>/a1/`, and current artifact files under `artifacts/<id>`. Step attempt directories contain prompt/output files for LLM steps, `usage.json` for LLM attempts, and a `manifest.json` plus `stderr.log` for exec steps. A map stores per-item work under its step version. Each non-map step execution attempt gets a new version, including retries after failure or human waiting. A failed or interrupted map reuses its current version when retried. State saves the workflow path, resolved input paths, frontier, rounds, artifacts, execution counts (`steps[id].attempts`), and completion sequence numbers as steps finish. Concurrent state writes are serialized.
 
 `continue` resumes the saved frontier, retrying failed or interrupted work. `rerun --from <step>` replaces the frontier with that single step and resets every case's count to zero. Both preserve current artifacts and past step versions. A rerun retains `waitFor` completion history and must satisfy the same fresh-completion rule.
 
@@ -49,9 +75,9 @@ Fixture mode reads `--llm fixtures/<set>` from `<set>/<step>/v<N>.md`, falling b
 
 ## LLM routes and gateways
 
-Each workflow directory may contain `routes.json` and `gateways.json`; `run`, `continue`, and `rerun` accept `--routes <path>` and `--gateways <path>` to override them. A route name maps to an ordered array of `{gateway, model, effort}` entries. `openai-chat` gateways use `{kind, baseUrl, apiKeyEnv, maxParallel?, cooldownMs?, timeoutMs?}`. `exec` gateways use `{kind, argv, limitPatterns?, cooldownMs?, timeoutMs?}`; `{model}` and `{effort}` are expanded in argv, and the prompt is sent on stdin. A `human` route uses the human input flow.
+Each workflow directory may contain `routes.json` and `gateways.json`; `run`, `continue`, and `rerun` accept `--routes <path>` and `--gateways <path>` to override them. A route name maps to an ordered array of `{gateway, model, effort}` entries. `openai-chat` gateways use `{kind, baseUrl, apiKeyEnv, envFile?, headers?, maxParallel?, cooldownMs?, timeoutMs?}`. `exec` gateways use `{kind, argv, limitPatterns?, maxParallel?, cooldownMs?}`; `{model}` and `{effort}` are expanded in argv, and the prompt is sent on stdin. A route named `human` uses the human input flow. `envFile` is used only when the named process environment variable is empty; relative paths are resolved from `gateways.json`. Headers are string values and `{requestId}` is replaced for each request.
 
-A 429, 402, or matching CLI limit pattern cools down that gateway and advances to the next route. Cooldowns are stored in `~/.cache/ai-pipeline/cooldown.json`, or `AIP_COOLDOWN_PATH`. `Retry-After` takes precedence over gateway `cooldownMs`, then a 60 minute default. Other errors fail the step. Each LLM attempt writes `usage.json` with token counts and route outcomes.
+A 429, 402, or matching CLI limit pattern cools down that gateway and tries the next currently available entry in route order. If all entries are cooling down, the router waits until the earliest cooldown expires. Cooldowns are stored in `~/.cache/ai-pipeline/cooldown.json`, or `AIP_COOLDOWN_PATH`. `Retry-After` takes precedence over gateway `cooldownMs`, then a 60 minute default. Other errors fail the step. Each LLM attempt writes `usage.json` with token counts and route outcomes; gateways without token accounting record zero counts.
 
 ## Components
 

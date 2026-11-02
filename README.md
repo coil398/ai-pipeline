@@ -1,27 +1,75 @@
 # ai-pipeline
 
-A small JavaScript engine for data-defined workflows combining language model steps, commands, and deterministic decisions. It uses Node.js built-ins and needs no build step.
+`ai-pipeline` is a small, data-defined workflow engine for running language-model calls, local commands, and deterministic decisions as one resumable run. A workflow declares its steps, artifact inputs and outputs, and transitions. The engine schedules active steps, records each result, and can resume or rerun a selected step.
 
-## Run
+The engine provides generic execution primitives. It does not define vocabulary, checks, hooks, roles, or policies for a particular application. Application-specific workflows, role text, routes, gateways, and components belong to the consuming project.
+
+## Requirements and installation
+
+Node.js 22 or later is required. The package is published from its Git repository. Consumers should pin a commit so their workflow uses a known engine revision:
+
+```sh
+npm install --save ai-pipeline@git+https://github.com/coil398/ai-pipeline.git#<commit>
+```
+
+Run the installed CLI through npm's binary lookup or by its package path:
+
+```sh
+npx aip run path/to/workflow.json --run-id example
+node_modules/ai-pipeline/bin/aip.js status --run-id example
+```
+
+The source checkout can also run `node bin/aip.js <command>`. No build step is required.
+
+## CLI
+
+All paths are resolved from the current working directory unless the definition specifies a path relative to `workflow.json`. The default run directory is `runs`; pass the same `--runs-dir` when operating on a run stored elsewhere.
+
+```text
+aip run <workflow.json> --run-id <id> [--inputs <file.json>] [--components <dir>] [--runs-dir <dir>] [--parallel <n>] [--llm <fixture-dir>|human|run:<run-id>] [--routes <path>] [--gateways <path>]
+aip continue --run-id <id> [--components <dir>] [--runs-dir <dir>] [--parallel <n>] [--llm <fixture-dir>|human|run:<run-id>] [--routes <path>] [--gateways <path>]
+aip rerun --run-id <id> --from <step> [--components <dir>] [--runs-dir <dir>] [--parallel <n>] [--llm <fixture-dir>|human|run:<run-id>] [--routes <path>] [--gateways <path>]
+aip status --run-id <id> [--runs-dir <dir>]
+aip render --run-id <id> [--runs-dir <dir>]
+```
+
+- `run` creates a run from a workflow. `--inputs` supplies a JSON object mapping declared input IDs to paths; paths in that JSON are relative to the JSON file. Only named inputs are replaced.
+- `--components` overrides the workflow's component directory. The selected directory is saved in run state and reused when continuing or rerunning.
+- `--runs-dir` selects the parent directory for run directories. `--run-id` names the run directory within it.
+- `--parallel` sets the maximum number of ordinary ready steps scheduled together (default `4`); an LLM gateway's `maxParallel` can further limit requests to that gateway.
+- `--llm <fixture-dir>` reads fixture responses; `--llm human` waits for a human response; `--llm run:<run-id>` replays outputs from another run. Without this option, configured routes are used.
+- `--routes` and `--gateways` override the corresponding JSON files beside the workflow. They are also accepted by `continue` and `rerun`.
+- `continue` resumes the saved frontier. `rerun --from <step>` makes only the named step pending and clears decision case counts while retaining artifacts and prior step versions.
+- `status` prints the state JSON. `render` prints a compact status view.
+
+The CLI reports a nonzero exit code for failed runs, a `max-rounds` stop, and a missing fixture response. A run waiting for input or a human response is represented in its saved state.
+
+## Workflow definition
+
+See [the workflow definition guide](docs/definition.md) for the complete schema and examples. It covers inputs, artifacts and manifests, `llm`, `exec`, `decide`, `map`, components, transitions and joins, routes and gateways, state files, leases, resume and rerun, and fixture/human/run replay. The `examples/` directory contains complete workflows with local inputs, roles, routes, gateways, scripts, and fixtures.
+
+Documentation:
+
+- `README.md`: purpose, installation, CLI, and test entry point.
+- [`docs/definition.md`](docs/definition.md): workflow authoring and runtime behavior.
+
+## Examples
+
+- [review-loop](examples/review-loop/workflow.json) shows a writer/reviewer loop driven by a decision and a case limit.
+- [design-change](examples/design-change/workflow.json) shows branched steps, a join, command execution, and fixture-backed model steps.
+
+Run an example without calling an external model:
 
 ```sh
 node bin/aip.js run examples/review-loop/workflow.json --run-id sample --runs-dir /tmp/aip-runs --llm examples/review-loop/fixtures/loop
 node bin/aip.js status --run-id sample --runs-dir /tmp/aip-runs
-node bin/aip.js continue --run-id sample --runs-dir /tmp/aip-runs
-node bin/aip.js rerun --run-id sample --from critic --runs-dir /tmp/aip-runs
+node bin/aip.js render --run-id sample --runs-dir /tmp/aip-runs
 ```
 
-Execution starts at the first step. Each completed step activates its `next` targets; omitting `next` activates the next step in the array, and `next: []` ends that path. A `decide` activates the first matching case's `goto`, or its optional `default`. Each case may have a positive integer `max` limiting how many times that case can be selected. Cases without `max` are not counted; advancing through them does not consume another case's limit. A selection that would exceed its limit stops with `stopped: max-rounds`, leaving the decision pending. A decide itself cannot have `max`. `inputs` and `output` / `outputs` carry artifacts. `waitFor` joins paths by requiring fresh completions from all listed steps.
+## Tests
 
-`optionalInputs` lists artifact IDs to include in the prompt or exec manifest only when their current files exist, without waiting for them. Listing a step's own output passes its previous value on subsequent executions.
+Run `npm test` to execute the Node.js test suite (`node --test`). The suite includes a source-vocabulary test over `src/` and `bin/`: workflow-engine code remains generic, with `verdict` permitted only in the decision step implementation. Keep application-specific vocabulary out of those engine directories.
 
-The engine saves the pending set (`frontier`), case selection counts, step execution counts, and current artifacts after each step completes. `continue` resumes that frontier. `rerun --from <step>` starts with only that step pending and resets all case selection counts, preserving artifacts and step versions. Saved numeric counts from older states are discarded on load; case counts start at zero. `render` shows a compact text view. `--parallel <n>` limits concurrent steps, together with gateway `maxParallel` limits. See [the definition guide](docs/definition.md), [review-loop](examples/review-loop/workflow.json), and [design-change](examples/design-change/workflow.json).
+## Changing the engine
 
-Use `--llm <fixture-directory>`, `--llm human`, or `--llm run:<run-id>` for fixture responses, human responses, or replay from another run. Run checks with `npm test` (`node --test`).
-
-An `exec` step can name a local `component` instead of `argv`. Set `components` in the workflow or use `--components <dir>`; each component runs `<dir>/<name>/run.mjs` with the standard `AIP_MANIFEST` input and output paths. See [components](docs/definition.md#components).
-
-## LLM routes
-
-Place `routes.json` and `gateways.json` beside `workflow.json`. Routes map names to ordered `{gateway, model, effort}` entries. Gateways use the built-in `openai-chat` HTTP interface or `exec` CLI interface; credentials are read from the named environment variable. For `openai-chat`, optional `envFile` reads that key from a KEY=VALUE file when the process environment variable is empty; relative paths are resolved from `gateways.json`. Optional `headers` adds string-valued HTTP headers; `{requestId}` is replaced with a fresh UUID for each request.
-Override the files with `--routes <path>` and `--gateways <path>`. Rate and usage limits cool down the gateway and advance to the next route. See [the definition guide](docs/definition.md) for configuration details.
+Commit and push engine changes to this repository. In each consuming repository, update the Git dependency to the intended commit and commit that dependency change. Runs use the package installed in `node_modules/ai-pipeline`; installing a new engine revision does not rewrite an existing run's saved state. Replace the dependency only when no run is in progress or needs to be resumed with its current engine version.
