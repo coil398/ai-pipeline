@@ -3,17 +3,7 @@
   "version": "0.1.0",
   "private": false,
   "type": "module",
-  "bin": {
-    "aip": "./bin/aip.js"
-  },
-  "scripts": {
-    "test": "node --test"
-  },
-  "dependencies": {
-    "@earendil-works/pi-ai": "1.4.0",
-    "@earendil-works/pi-coding-agent": "1.4.0"
-  },
-  "engines": {
-    "node": ">=22"
-  }
+  "bin": { "aip": "./bin/aip.js" },
+  "scripts": { "test": "node --test" },
+  "engines": { "node": ">=22" }
 }

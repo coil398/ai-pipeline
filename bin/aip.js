@@ -136,13 +136,8 @@ async function runLoaded(loaded, runDir, state, parallel) {
     ? JSON.parse(await readText(gatewaysFile))
     : {};
   for (const gateway of Object.values(gateways)) {
-    if ((gateway.kind === "openai-chat" || gateway.kind === "pi") && gateway.envFile) {
+    if (gateway.kind === "openai-chat" && gateway.envFile) {
       gateway.envFile = path.resolve(path.dirname(gatewaysFile), gateway.envFile);
-    }
-    if (gateway.kind === "pi" && gateway.toolModules) {
-      gateway.toolModules = gateway.toolModules.map((modulePath) =>
-        path.resolve(path.dirname(gatewaysFile), modulePath)
-      );
     }
   }
   let gateway;
@@ -160,8 +155,6 @@ async function runLoaded(loaded, runDir, state, parallel) {
         routes,
         gateways,
         attemptDir: context.dir,
-        gatewaysDir: path.dirname(gatewaysFile),
-        runDir,
       });
     };
   } else if (llmMode.startsWith("run:")) {
