@@ -10,8 +10,8 @@ const cooldownPath = () =>
   process.env.AIP_COOLDOWN_PATH ??
     path.join(os.homedir(), ".cache", "ai-pipeline", "cooldown.json");
 
-/** @param {{route:string,prompt:string,routes:Record<string,Array<{gateway:string,model:string,effort?:string}>>,gateways:Record<string,any>}} options */
-export async function routeLlm({ route, prompt, routes, gateways }) {
+/** @param {{route:string,prompt:string,routes:Record<string,Array<{gateway:string,model:string,effort?:string}>>,gateways:Record<string,any>,attemptDir?:string}} options */
+export async function routeLlm({ route, prompt, routes, gateways, attemptDir }) {
   const entries = routes[route];
   if (!entries?.length) throw new Error(`unknown route: ${route}`);
   const tried = [];
@@ -41,7 +41,7 @@ export async function routeLlm({ route, prompt, routes, gateways }) {
           ? await withParallel(
             entry.gateway,
             gateway.maxParallel,
-            () => execGateway(gateway, { ...entry, prompt }),
+            () => execGateway(gateway, { ...entry, prompt, attemptDir }),
           )
           : (() => {
             throw new Error(`unsupported gateway kind: ${gateway.kind}`);

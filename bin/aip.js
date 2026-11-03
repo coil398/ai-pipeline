@@ -154,6 +154,7 @@ async function runLoaded(loaded, runDir, state, parallel) {
         prompt: context.prompt,
         routes,
         gateways,
+        attemptDir: context.dir,
       });
     };
   } else if (llmMode.startsWith("run:")) {

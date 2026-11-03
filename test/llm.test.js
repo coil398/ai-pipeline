@@ -404,6 +404,7 @@ test("exec gateway returns stdout and limit patterns advance to next route", asy
           effort: "y",
         }],
       },
+      attemptDir: path.join(temp, "attempt"),
       gateways: {
         limited: {
           kind: "exec",
@@ -420,14 +421,17 @@ test("exec gateway returns stdout and limit patterns advance to next route", asy
           argv: [
             "node",
             "-e",
-            "process.stdin.resume();console.log(process.argv[1]+' '+process.argv[2])",
+            "process.stdin.resume();console.log(process.argv[1]+' '+process.argv[2]+' '+process.cwd()+' '+process.argv[3])",
             "{model}",
             "{effort}",
+            "{workdir}",
           ],
         },
       },
     });
     assert.match(result.text, /b y/);
+    const workdir = path.join(temp, "attempt/work");
+    assert.match(result.text, new RegExp(`${workdir} ${workdir.replaceAll("\\", "\\\\")}`));
     assert.deepEqual(result.tried.map((item) => item.result), [
       "limit",
       "success",
@@ -435,6 +439,46 @@ test("exec gateway returns stdout and limit patterns advance to next route", asy
   } finally {
     if (prior === undefined) delete process.env.AIP_COOLDOWN_PATH;
     else process.env.AIP_COOLDOWN_PATH = prior;
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+test("exec gateway uses a non-empty outputFile and falls back to stdout otherwise", async () => {
+  const { execGateway } = await import("../src/llm/gateways/exec.js");
+  const temp = await tempRoot();
+  try {
+    for (const [mode, expected] of [
+      ["content", "file output"],
+      ["missing", "stdout output"],
+      ["empty", "stdout output"],
+    ]) {
+      const attemptDir = path.join(temp, mode);
+      const script = [
+        "const fs = require('node:fs');",
+        "console.log('stdout output');",
+        "if (process.argv[1] === 'content') fs.writeFileSync('output.md', 'file output');",
+        "if (process.argv[1] === 'empty') fs.writeFileSync('output.md', '');",
+      ].join(" ");
+      const result = await execGateway({
+        argv: [process.execPath, "-e", script, mode],
+        outputFile: "output.md",
+      }, { model: "m", prompt: "p", attemptDir });
+      assert.equal(result.text.trim(), expected);
+    }
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+test("exec gateway runs in its work directory and expands {workdir}", async () => {
+  const { execGateway } = await import("../src/llm/gateways/exec.js");
+  const temp = await tempRoot();
+  try {
+    const attemptDir = path.join(temp, "attempt");
+    const result = await execGateway({
+      argv: [process.execPath, "-e", "console.log(process.cwd()+'|'+process.argv[1])", "{workdir}"],
+    }, { model: "m", prompt: "p", attemptDir });
+    const expected = path.join(attemptDir, "work");
+    assert.equal(result.text.trim(), `${expected}|${expected}`);
+  } finally {
     await rm(temp, { recursive: true, force: true });
   }
 });
