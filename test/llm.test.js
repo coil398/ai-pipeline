@@ -46,6 +46,34 @@ test("openai chat assembles split SSE content and usage, stopping at DONE", asyn
     globalThis.fetch = priorFetch;
   }
 });
+test("openai chat rejects an SSE response that ends at DONE without content", async () => {
+  const { openaiChat } = await import("../src/llm/gateways/openai-chat.js");
+  const priorFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => "text/event-stream" },
+    body: (async function* () {
+      yield new TextEncoder().encode('data: {"choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}\n');
+      yield new TextEncoder().encode("data: [DONE]\n");
+    })(),
+  });
+  try {
+    await assert.rejects(
+      openaiChat(
+        { baseUrl: "http://example.invalid" },
+        { model: "m", prompt: "p" },
+      ),
+      (error) => {
+        assert.equal(error.message, "empty response");
+        assert.equal(error.kind, undefined);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = priorFetch;
+  }
+});
 test("openai chat continues to read JSON responses", async () => {
   const { openaiChat } = await import("../src/llm/gateways/openai-chat.js");
   const priorFetch = globalThis.fetch;
@@ -76,7 +104,11 @@ test("openai chat applies configured headers with a fresh requestId per request"
   const seen = [];
   globalThis.fetch = async (_url, options) => {
     seen.push(options.headers);
-    return { ok: true, status: 200, json: async () => ({}) };
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: "ok" } }] }),
+    };
   };
   try {
     const gateway = {

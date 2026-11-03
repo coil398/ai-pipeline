@@ -62,9 +62,11 @@ export async function openaiChat(gateway, request) {
     const body = contentType.includes("text/event-stream")
       ? await readEventStream(response.body)
       : await response.json();
+    const text = body.text ?? body.choices?.[0]?.message?.content ?? "";
+    if (!text.trim()) throw new Error("empty response");
     const usage = body.usage ?? {};
     return {
-      text: body.text ?? body.choices?.[0]?.message?.content ?? "",
+      text,
       usage: {
         inputTokens: usage.prompt_tokens ?? 0,
         outputTokens: usage.completion_tokens ?? 0,
