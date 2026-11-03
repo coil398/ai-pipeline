@@ -75,7 +75,21 @@ Fixture mode reads `--llm fixtures/<set>` from `<set>/<step>/v<N>.md`, falling b
 
 ## LLM routes and gateways
 
-Each workflow directory may contain `routes.json` and `gateways.json`; `run`, `continue`, and `rerun` accept `--routes <path>` and `--gateways <path>` to override them. A route name maps to an ordered array of `{gateway, model, effort}` entries. `openai-chat` gateways use `{kind, baseUrl, apiKeyEnv, envFile?, headers?, maxParallel?, cooldownMs?, timeoutMs?}`. `exec` gateways use `{kind, argv, outputFile?, limitPatterns?, maxParallel?, cooldownMs?}`; `{model}`, `{effort}`, and `{workdir}` are expanded in argv, and the prompt is sent on stdin. Each exec process runs in a `work/` directory under its LLM step attempt directory (`steps/<step>/v<N>/a<M>/work/`). If `outputFile` names a non-empty file in that directory, its contents become the LLM output; otherwise stdout is used. A route named `human` uses the human input flow. `envFile` is used only when the named process environment variable is empty; relative paths are resolved from `gateways.json`. Headers are string values and `{requestId}` is replaced for each request.
+Each workflow directory may contain `routes.json` and `gateways.json`; `run`, `continue`, and `rerun` accept `--routes <path>` and `--gateways <path>` to override them. A route name maps to an ordered array of `{gateway, model, effort}` entries. `openai-chat` gateways use `{kind, baseUrl, apiKeyEnv, envFile?, headers?, maxParallel?, cooldownMs?, timeoutMs?}`. `exec` gateways use `{kind, argv, outputFile?, limitPatterns?, maxParallel?, cooldownMs?}`; `{model}`, `{effort}`, and `{workdir}` are expanded in argv, and the prompt is sent on stdin. Each exec process runs in a `work/` directory under its LLM step attempt directory (`steps/<step>/v<N>/a<M>/work/`). If `outputFile` names a non-empty file in that directory, its contents become the LLM output; otherwise stdout is used. `pi` gateways use `{kind, provider, baseUrl?, apiKeyEnv?, envFile?, outputFile?, tools?, toolModules?, maxParallel?, cooldownMs?}` and run a Pi agent session in the same per-attempt `work/` directory. The route entry selects the model and thinking effort. Each `toolModules` path is relative to `gateways.json`; its default export receives `{workdir, attemptDir, runDir}` and returns Pi tool definitions. The gateway uses a non-empty `outputFile` in `work/` before the last assistant message. Example:
+
+```json
+{
+  "pi-codex": {
+    "kind": "pi",
+    "provider": "codex",
+    "tools": ["read", "write", "edit", "bash"],
+    "outputFile": "output.md",
+    "toolModules": ["tools/echo-marker.js"]
+  }
+}
+```
+
+A route can select it with `[{"gateway":"pi-codex","model":"gpt-6-luna","effort":"low"}]`. A route named `human` uses the human input flow. `envFile` is used only when the named process environment variable is empty; relative paths are resolved from `gateways.json`. Headers are string values and `{requestId}` is replaced for each request.
 
 A 429, 402, or matching CLI limit pattern cools down that gateway and tries the next currently available entry in route order. If all entries are cooling down, the router waits until the earliest cooldown expires. Cooldowns are stored in `~/.cache/ai-pipeline/cooldown.json`, or `AIP_COOLDOWN_PATH`. `Retry-After` takes precedence over gateway `cooldownMs`, then a 60 minute default. Other errors fail the step. Each LLM attempt writes `usage.json` with token counts and route outcomes; gateways without token accounting record zero counts.
 

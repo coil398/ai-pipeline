@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { openaiChat } from "./gateways/openai-chat.js";
 import { execGateway } from "./gateways/exec.js";
+import { piGateway } from "./gateways/pi.js";
 import { atomicJson, exists, readJson } from "../io/files.js";
 
 const DEFAULT_COOLDOWN = 60 * 60 * 1000;
@@ -10,8 +11,8 @@ const cooldownPath = () =>
   process.env.AIP_COOLDOWN_PATH ??
     path.join(os.homedir(), ".cache", "ai-pipeline", "cooldown.json");
 
-/** @param {{route:string,prompt:string,routes:Record<string,Array<{gateway:string,model:string,effort?:string}>>,gateways:Record<string,any>,attemptDir?:string}} options */
-export async function routeLlm({ route, prompt, routes, gateways, attemptDir }) {
+/** @param {{route:string,prompt:string,routes:Record<string,Array<{gateway:string,model:string,effort?:string}>>,gateways:Record<string,any>,attemptDir?:string,gatewaysDir?:string,runDir?:string}} options */
+export async function routeLlm({ route, prompt, routes, gateways, attemptDir, gatewaysDir, runDir }) {
   const entries = routes[route];
   if (!entries?.length) throw new Error(`unknown route: ${route}`);
   const tried = [];
@@ -42,6 +43,19 @@ export async function routeLlm({ route, prompt, routes, gateways, attemptDir }) 
             entry.gateway,
             gateway.maxParallel,
             () => execGateway(gateway, { ...entry, prompt, attemptDir }),
+          )
+          : gateway.kind === "pi"
+          ? await withParallel(
+            entry.gateway,
+            gateway.maxParallel,
+            () => piGateway(gateway, {
+              ...entry,
+              prompt,
+              attemptDir,
+              gatewaysDir,
+              runDir,
+              gatewayId: entry.gateway,
+            }),
           )
           : (() => {
             throw new Error(`unsupported gateway kind: ${gateway.kind}`);
