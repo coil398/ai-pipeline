@@ -411,7 +411,7 @@ test("exec gateway returns stdout and limit patterns advance to next route", asy
           argv: [
             "node",
             "-e",
-            "process.stdin.resume();console.log('quota limit')",
+            "process.stdin.resume();console.log('Quota Limit');process.exit(1)",
           ],
           limitPatterns: ["quota limit"],
           cooldownMs: 10,
@@ -439,6 +439,60 @@ test("exec gateway returns stdout and limit patterns advance to next route", asy
   } finally {
     if (prior === undefined) delete process.env.AIP_COOLDOWN_PATH;
     else process.env.AIP_COOLDOWN_PATH = prior;
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+test("exec gateway only matches case-insensitive limit patterns on failure", async () => {
+  const { execGateway } = await import("../src/llm/gateways/exec.js");
+  const temp = await tempRoot();
+  try {
+    const base = {
+      argv: [process.execPath, "-e", "console.log('Usage Limit reached')"],
+      limitPatterns: ["usage limit"],
+    };
+    const success = await execGateway(base, {
+      model: "m",
+      prompt: "p",
+      attemptDir: path.join(temp, "success"),
+    });
+    assert.match(success.text, /Usage Limit/);
+
+    await assert.rejects(
+      execGateway({
+        ...base,
+        argv: [process.execPath, "-e", "console.log('USAGE LIMIT');process.exit(2)"],
+      }, {
+        model: "m",
+        prompt: "p",
+        attemptDir: path.join(temp, "limit"),
+      }),
+      (error) => error.kind === "limit",
+    );
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+test("exec gateway terminates timed out child processes", async () => {
+  const { execGateway } = await import("../src/llm/gateways/exec.js");
+  const temp = await tempRoot();
+  const attemptDir = path.join(temp, "attempt");
+  try {
+    await assert.rejects(
+      execGateway({
+        argv: [
+          process.execPath,
+          "-e",
+          "process.on('SIGTERM',()=>{require('node:fs').writeFileSync('terminated','yes');process.exit(0)});setInterval(()=>{},1000)",
+        ],
+        timeoutMs: 50,
+      }, { model: "m", prompt: "p", attemptDir }),
+      (error) => error.kind === "timeout",
+    );
+    assert.equal(
+      await readFile(path.join(attemptDir, "work", "terminated"), "utf8"),
+      "yes",
+    );
+  } finally {
     await rm(temp, { recursive: true, force: true });
   }
 });

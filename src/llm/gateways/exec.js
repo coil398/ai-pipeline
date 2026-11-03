@@ -25,18 +25,42 @@ export async function execGateway(gateway, request) {
       });
       let stdout = "";
       let stderr = "";
+      let timedOut = false;
+      let killTimer;
+      const timeoutTimer = gateway.timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+          timedOut = true;
+          child.kill("SIGTERM");
+          killTimer = setTimeout(() => child.kill("SIGKILL"), 10_000);
+        }, gateway.timeoutMs);
+      const clearTimers = () => {
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        if (killTimer) clearTimeout(killTimer);
+      };
       child.stdout.setEncoding("utf8").on("data", (chunk) => {
         stdout += chunk;
       });
       child.stderr.setEncoding("utf8").on("data", (chunk) => {
         stderr += chunk;
       });
-      child.on("error", reject);
+      child.on("error", (error) => {
+        clearTimers();
+        reject(error);
+      });
       child.on("close", async (code) => {
+        clearTimers();
+        if (timedOut) {
+          const error = /** @type {any} */ (new Error(
+            `exec gateway timed out after ${gateway.timeoutMs}ms`,
+          ));
+          error.kind = "timeout";
+          return reject(error);
+        }
         const output = `${stdout}\n${stderr}`;
-        if (
+        if (code !== 0 &&
           (gateway.limitPatterns ?? []).some((pattern) =>
-            output.includes(pattern)
+            output.toLowerCase().includes(pattern.toLowerCase())
           )
         ) {
           const error = /** @type {any} */ (new Error(

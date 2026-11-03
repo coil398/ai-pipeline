@@ -39,6 +39,7 @@ aip render --run-id <id> [--runs-dir <dir>]
 - `--parallel` sets the maximum number of ordinary ready steps scheduled together (default `4`); an LLM gateway's `maxParallel` can further limit requests to that gateway.
 - `--llm <fixture-dir>` reads fixture responses; `--llm human` waits for a human response; `--llm run:<run-id>` replays outputs from another run. Without this option, configured routes are used.
 - `--routes` and `--gateways` override the corresponding JSON files beside the workflow. They are also accepted by `continue` and `rerun`.
+- `exec` gateway configurations accept `timeoutMs`; timed out processes receive SIGTERM and then SIGKILL after 10 seconds. Without `timeoutMs`, they have no time limit.
 - `continue` resumes the saved frontier. `rerun --from <step>` makes only the named step pending and clears decision case counts while retaining artifacts and prior step versions.
 - `status` prints the state JSON. `render` prints a compact status view.
 
