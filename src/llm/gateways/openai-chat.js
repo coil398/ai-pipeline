@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 
-/** @param {{baseUrl:string, apiKeyEnv:string, envFile?:string, timeoutMs?:number, headers?:Record<string,string>}} gateway @param {{model:string, effort?:string, prompt:string}} request @returns {Promise<{text:string, usage:{inputTokens:number,outputTokens:number,totalTokens:number}}>} */
+/** @param {{baseUrl:string, apiKeyEnv:string, envFile?:string, timeoutMs?:number, idleTimeoutMs?:number, headers?:Record<string,string>}} gateway @param {{model:string, effort?:string, prompt:string}} request @returns {Promise<{text:string, usage:{inputTokens:number,outputTokens:number,totalTokens:number}}>} */
 export async function openaiChat(gateway, request) {
   const apiKey = gateway.apiKeyEnv
     ? process.env[gateway.apiKeyEnv] ||
@@ -11,6 +11,19 @@ export async function openaiChat(gateway, request) {
     throw new Error(`missing API key environment variable: ${gateway.apiKeyEnv}`);
   }
   const controller = new AbortController();
+  const idleTimeoutMs = gateway.idleTimeoutMs ?? 300_000;
+  let idleTimer;
+  let idleTimedOut = false;
+  const resetIdleTimer = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = idleTimeoutMs > 0
+      ? setTimeout(() => {
+          idleTimedOut = true;
+          controller.abort();
+        }, idleTimeoutMs)
+      : undefined;
+  };
+  resetIdleTimer();
   const timer = gateway.timeoutMs
     ? setTimeout(() => controller.abort(), gateway.timeoutMs)
     : undefined;
@@ -42,6 +55,7 @@ export async function openaiChat(gateway, request) {
         signal: controller.signal,
       },
     );
+    resetIdleTimer();
     if (response.status === 429 || response.status === 402) {
       const error =
         /** @type {any} */ (new Error(`limit: HTTP ${response.status}`));
@@ -60,7 +74,7 @@ export async function openaiChat(gateway, request) {
     }
     const contentType = response.headers?.get("content-type") ?? "";
     const body = contentType.includes("text/event-stream")
-      ? await readEventStream(response.body)
+      ? await readEventStream(response.body, resetIdleTimer)
       : await response.json();
     const text = body.text ?? body.choices?.[0]?.message?.content ?? "";
     if (!text.trim()) throw new Error("empty response");
@@ -73,16 +87,21 @@ export async function openaiChat(gateway, request) {
         totalTokens: usage.total_tokens ?? 0,
       },
     };
+  } catch (error) {
+    if (idleTimedOut) throw new Error(`stream idle for ${idleTimeoutMs}ms`);
+    throw error;
   } finally {
     if (timer) clearTimeout(timer);
+    if (idleTimer) clearTimeout(idleTimer);
   }
 }
-async function readEventStream(stream) {
+async function readEventStream(stream, onChunk) {
   let text = "";
   let usage = {};
   let buffer = "";
   const decoder = new TextDecoder();
   for await (const chunk of stream) {
+    onChunk();
     buffer += typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
     let newline;
     while ((newline = buffer.indexOf("\n")) >= 0) {

@@ -46,6 +46,42 @@ test("openai chat assembles split SSE content and usage, stopping at DONE", asyn
     globalThis.fetch = priorFetch;
   }
 });
+test("openai chat aborts an SSE stream that stays idle after headers", async (t) => {
+  const { openaiChat } = await import("../src/llm/gateways/openai-chat.js");
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.flushHeaders();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  await assert.rejects(
+    openaiChat(
+      { baseUrl: `http://127.0.0.1:${server.address().port}`, idleTimeoutMs: 50 },
+      { model: "m", prompt: "p" },
+    ),
+    /stream idle for 50ms/,
+  );
+});
+test("openai chat keeps an SSE stream alive while chunks continue arriving", async (t) => {
+  const { openaiChat } = await import("../src/llm/gateways/openai-chat.js");
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write('data: {"choices":[{"delta":{"content":"A"}}]}\n');
+    const second = setTimeout(() => {
+      response.write('data: {"choices":[{"delta":{"content":"B"}}]}\n');
+      const done = setTimeout(() => response.end("data: [DONE]\n"), 30);
+      done.unref();
+    }, 30);
+    second.unref();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const result = await openaiChat(
+    { baseUrl: `http://127.0.0.1:${server.address().port}`, idleTimeoutMs: 50 },
+    { model: "m", prompt: "p" },
+  );
+  assert.equal(result.text, "AB");
+});
 test("openai chat rejects an SSE response that ends at DONE without content", async () => {
   const { openaiChat } = await import("../src/llm/gateways/openai-chat.js");
   const priorFetch = globalThis.fetch;
@@ -484,7 +520,7 @@ test("exec gateway terminates timed out child processes", async () => {
           "-e",
           "process.on('SIGTERM',()=>{require('node:fs').writeFileSync('terminated','yes');process.exit(0)});setInterval(()=>{},1000)",
         ],
-        timeoutMs: 50,
+        timeoutMs: 500,
       }, { model: "m", prompt: "p", attemptDir }),
       (error) => error.kind === "timeout",
     );
