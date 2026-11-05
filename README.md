@@ -26,9 +26,9 @@ The source checkout can also run `node bin/aip.js <command>`. No build step is r
 All paths are resolved from the current working directory unless the definition specifies a path relative to `workflow.json`. The default run directory is `runs`; pass the same `--runs-dir` when operating on a run stored elsewhere.
 
 ```text
-aip run <workflow.json> --run-id <id> [--inputs <file.json>] [--components <dir>] [--runs-dir <dir>] [--parallel <n>] [--llm <fixture-dir>|human|run:<run-id>] [--routes <path>] [--gateways <path>]
-aip continue --run-id <id> [--components <dir>] [--runs-dir <dir>] [--parallel <n>] [--llm <fixture-dir>|human|run:<run-id>] [--routes <path>] [--gateways <path>]
-aip rerun --run-id <id> --from <step> [--components <dir>] [--runs-dir <dir>] [--parallel <n>] [--llm <fixture-dir>|human|run:<run-id>] [--routes <path>] [--gateways <path>]
+aip run <workflow.json> --run-id <id> [--inputs <file.json>] [--components <dir>] [--runs-dir <dir>] [--parallel <n>] [--llm <fixture-dir>|human|run:<run-id>] [--routes <path>] [--gateways <path>] [--fallbacks <path>]
+aip continue --run-id <id> [--components <dir>] [--runs-dir <dir>] [--parallel <n>] [--llm <fixture-dir>|human|run:<run-id>] [--routes <path>] [--gateways <path>] [--fallbacks <path>]
+aip rerun --run-id <id> --from <step> [--components <dir>] [--runs-dir <dir>] [--parallel <n>] [--llm <fixture-dir>|human|run:<run-id>] [--routes <path>] [--gateways <path>] [--fallbacks <path>]
 aip status --run-id <id> [--runs-dir <dir>]
 aip render --run-id <id> [--runs-dir <dir>]
 ```
@@ -39,6 +39,7 @@ aip render --run-id <id> [--runs-dir <dir>]
 - `--parallel` sets the maximum number of ordinary ready steps scheduled together (default `4`); an LLM gateway's `maxParallel` can further limit requests to that gateway.
 - `--llm <fixture-dir>` reads fixture responses; `--llm human` waits for a human response; `--llm run:<run-id>` replays outputs from another run. Without this option, configured routes are used.
 - `--routes` and `--gateways` override the corresponding JSON files beside the workflow. They are also accepted by `continue` and `rerun`.
+- `fallbacks.json` beside the workflow optionally maps each `<gateway>:<model>` to an ordered array of alternate `{gateway, model, effort?}` entries. An alternate without `effort` inherits it from the route entry. Each route entry is followed by its alternates; only limit errors advance to the next entry. `--fallbacks` overrides this file and is accepted by `run`, `continue`, and `rerun`. If the file is absent, no alternates are added.
 - `exec` gateway configurations accept `timeoutMs`; timed out processes receive SIGTERM and then SIGKILL after 10 seconds. Without `timeoutMs`, they have no time limit.
 - `openai-chat` gateway configurations accept `idleTimeoutMs` (default `300000` ms); it aborts a request if response headers or the next stream chunk do not arrive in time. Set it to `0` to disable the idle timeout.
 - `continue` resumes the saved frontier. `rerun --from <step>` makes only the named step pending and clears decision case counts while retaining artifacts and prior step versions.

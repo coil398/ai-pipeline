@@ -20,7 +20,7 @@ function option(name, fallback = undefined) {
 }
 function usage() {
   console.log(
-    "aip run <workflow.json> --run-id <id> [--inputs <file.json>] [--components <dir>] [--runs-dir <dir>] [--parallel <n>] [--llm <fixture-dir>|run:<run-id>] [--routes <path>] [--gateways <path>]\naip continue --run-id <id> [--components <dir>]\naip rerun --run-id <id> --from <step> [--components <dir>]\naip status --run-id <id>\naip render --run-id <id>",
+    "aip run <workflow.json> --run-id <id> [--inputs <file.json>] [--components <dir>] [--runs-dir <dir>] [--parallel <n>] [--llm <fixture-dir>|run:<run-id>] [--routes <path>] [--gateways <path>] [--fallbacks <path>]\naip continue --run-id <id> [--components <dir>] [--fallbacks <path>]\naip rerun --run-id <id> --from <step> [--components <dir>] [--fallbacks <path>]\naip status --run-id <id>\naip render --run-id <id>",
   );
 }
 async function main() {
@@ -135,6 +135,33 @@ async function runLoaded(loaded, runDir, state, parallel) {
   const gateways = await exists(gatewaysFile)
     ? JSON.parse(await readText(gatewaysFile))
     : {};
+  const fallbacksFile = path.resolve(
+    option("--fallbacks", path.join(definitionDir, "fallbacks.json")),
+  );
+  const fallbacks = await exists(fallbacksFile)
+    ? JSON.parse(await readText(fallbacksFile))
+    : {};
+  if (!fallbacks || typeof fallbacks !== "object" || Array.isArray(fallbacks)) {
+    throw new Error("fallbacks must be an object mapping gateway:model to arrays");
+  }
+  for (const [key, entries] of Object.entries(fallbacks)) {
+    const separator = key.indexOf(":");
+    if (separator < 1 || separator === key.length - 1) {
+      throw new Error(`invalid fallback key: ${key}`);
+    }
+    if (!Array.isArray(entries)) throw new Error(`fallback ${key} must be an array`);
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry) ||
+        typeof entry.gateway !== "string" || !entry.gateway ||
+        typeof entry.model !== "string" || !entry.model ||
+        (entry.effort !== undefined && typeof entry.effort !== "string")) {
+        throw new Error(`invalid fallback entry for ${key}`);
+      }
+      if (!Object.hasOwn(gateways, entry.gateway)) {
+        throw new Error(`unknown gateway: ${entry.gateway}`);
+      }
+    }
+  }
   for (const gateway of Object.values(gateways)) {
     if (gateway.kind === "openai-chat" && gateway.envFile) {
       gateway.envFile = path.resolve(path.dirname(gatewaysFile), gateway.envFile);
@@ -154,6 +181,7 @@ async function runLoaded(loaded, runDir, state, parallel) {
         prompt: context.prompt,
         routes,
         gateways,
+        fallbacks,
         attemptDir: context.dir,
       });
     };

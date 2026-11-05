@@ -9,6 +9,25 @@ import { spawn } from "node:child_process";
 const root = path.resolve(".");
 const cli = path.join(root, "bin/aip.js");
 const tempRoot = () => mkdtemp(path.join(os.tmpdir(), "aip-llm-"));
+test("fallback expansion inherits effort, removes duplicates, and stops after one level", async () => {
+  const { expandRouteEntries } = await import("../src/llm/router.js");
+  assert.deepEqual(expandRouteEntries([
+    { gateway: "a", model: "m", effort: "high" },
+    { gateway: "b", model: "n" },
+  ], {
+    "a:m": [
+      { gateway: "b", model: "n" },
+      { gateway: "c", model: "o", effort: "low" },
+    ],
+    "b:n": [{ gateway: "c", model: "o", effort: "low" }],
+    "c:o": [{ gateway: "d", model: "p" }],
+  }), [
+    { gateway: "a", model: "m", effort: "high" },
+    { gateway: "b", model: "n", effort: "high" },
+    { gateway: "c", model: "o", effort: "low" },
+    { gateway: "b", model: "n" },
+  ]);
+});
 test("openai chat assembles split SSE content and usage, stopping at DONE", async () => {
   const { openaiChat } = await import("../src/llm/gateways/openai-chat.js");
   const priorFetch = globalThis.fetch;
@@ -323,6 +342,20 @@ async function workflow(dir, route = "test-route") {
     }),
   );
 }
+test("fallbacks reject references to gateways missing from gateways.json", async (t) => {
+  const temp = await tempRoot();
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const dir = path.join(temp, "wf");
+  await workflow(dir);
+  await writeFile(path.join(dir, "gateways.json"), JSON.stringify({ first: { kind: "exec", argv: ["true"] } }));
+  await writeFile(path.join(dir, "fallbacks.json"), JSON.stringify({
+    "first:m1": [{ gateway: "missing", model: "m2" }],
+  }));
+  await run([
+    "run", path.join(dir, "workflow.json"), "--run-id", "invalid",
+    "--runs-dir", path.join(temp, "runs"),
+  ], {}, 1);
+});
 test("429 advances route, records cooldown and tried route usage", async (t) => {
   const temp = await tempRoot();
   t.after(() => rm(temp, { recursive: true, force: true }));
@@ -386,6 +419,38 @@ test("429 advances route, records cooldown and tried route usage", async (t) => 
   assert.ok(
     values.first >= Date.now() + 119000 && values.first <= Date.now() + 121000,
   );
+});
+test("limit advances from a route entry to its configured fallback", async (t) => {
+  const { routeLlm } = await import("../src/llm/router.js");
+  const temp = await tempRoot();
+  const prior = process.env.AIP_COOLDOWN_PATH;
+  process.env.AIP_COOLDOWN_PATH = path.join(temp, "cooldown.json");
+  t.after(async () => {
+    if (prior === undefined) delete process.env.AIP_COOLDOWN_PATH;
+    else process.env.AIP_COOLDOWN_PATH = prior;
+    await rm(temp, { recursive: true, force: true });
+  });
+  const result = await routeLlm({
+    route: "r",
+    prompt: "p",
+    routes: { r: [{ gateway: "limited", model: "m", effort: "high" }] },
+    fallbacks: { "limited:m": [{ gateway: "ok", model: "alternate" }] },
+    gateways: {
+      limited: {
+        kind: "exec",
+        argv: ["node", "-e", "process.stdin.resume();console.log('Quota Limit');process.exit(1)"],
+        limitPatterns: ["quota limit"],
+        cooldownMs: 1,
+      },
+      ok: { kind: "exec", argv: ["node", "-e", "process.stdin.resume();console.log('ok')"] },
+    },
+    attemptDir: path.join(temp, "attempt"),
+  });
+  assert.equal(result.gateway, "ok");
+  assert.equal(result.effort, "high");
+  assert.deepEqual(result.tried.map(({ gateway, result: outcome }) => [gateway, outcome]), [
+    ["limited", "limit"], ["ok", "success"],
+  ]);
 });
 test("cooldown route is skipped and expired route is selected after earliest cooldown wait", async () => {
   const { routeLlm } = await import("../src/llm/router.js");

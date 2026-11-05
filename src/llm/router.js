@@ -12,8 +12,11 @@ const cooldownPath = () =>
     path.join(os.homedir(), ".cache", "ai-pipeline", "cooldown.json");
 
 /** @param {{route:string,prompt:string,routes:Record<string,Array<{gateway:string,model:string,effort?:string}>>,gateways:Record<string,any>,attemptDir?:string}} options */
-export async function routeLlm({ route, prompt, routes, gateways, attemptDir }) {
-  const entries = routes[route];
+export async function routeLlm({ route, prompt, routes, gateways, fallbacks = {}, attemptDir }) {
+  const routeEntries = routes[route];
+  const entries = routeEntries?.length
+    ? expandRouteEntries(routeEntries, fallbacks)
+    : routeEntries;
   if (!entries?.length) throw new Error(`unknown route: ${route}`);
   const tried = [];
   for (;;) {
@@ -99,6 +102,25 @@ export async function routeLlm({ route, prompt, routes, gateways, attemptDir }) 
       }
     }
   }
+}
+
+export function expandRouteEntries(entries, fallbacks) {
+  const expanded = [];
+  const seen = new Set();
+  for (const entry of entries) {
+    const alternatives = fallbacks[`${entry.gateway}:${entry.model}`] ?? [];
+    for (const candidate of [entry, ...alternatives.map((alternative) => ({
+      ...alternative,
+      effort: alternative.effort ?? entry.effort,
+    }))]) {
+      const key = JSON.stringify([candidate.gateway, candidate.model, candidate.effort]);
+      if (!seen.has(key)) {
+        seen.add(key);
+        expanded.push(candidate);
+      }
+    }
+  }
+  return expanded;
 }
 async function loadCooldowns() {
   const file = cooldownPath();
