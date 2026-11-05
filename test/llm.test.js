@@ -392,6 +392,12 @@ test("cooldown route is skipped and expired route is selected after earliest coo
   const temp = await tempRoot();
   const cooldown = path.join(temp, "cooldown.json");
   const prior = process.env.AIP_COOLDOWN_PATH;
+  const priorWrite = process.stderr.write;
+  let stderr = "";
+  process.stderr.write = (chunk) => {
+    stderr += chunk;
+    return true;
+  };
   process.env.AIP_COOLDOWN_PATH = cooldown;
   try {
     await writeFile(
@@ -418,7 +424,10 @@ test("cooldown route is skipped and expired route is selected after earliest coo
     });
     seen.push(result.gateway);
     assert.deepEqual(seen, ["second"]);
+    assert.match(stderr, /WARN route_wait route=r .*waitMs=\d+/);
+    assert.match(stderr, /cooldowns=first=\d{4}-\d\d-\d\dT.*Z,second=\d{4}-\d\d-\d\dT.*Z/);
   } finally {
+    process.stderr.write = priorWrite;
     if (prior === undefined) delete process.env.AIP_COOLDOWN_PATH;
     else process.env.AIP_COOLDOWN_PATH = prior;
     await rm(temp, { recursive: true, force: true });
@@ -428,6 +437,12 @@ test("exec gateway returns stdout and limit patterns advance to next route", asy
   const { routeLlm } = await import("../src/llm/router.js");
   const temp = await tempRoot();
   const prior = process.env.AIP_COOLDOWN_PATH;
+  const priorWrite = process.stderr.write;
+  let stderr = "";
+  process.stderr.write = (chunk) => {
+    stderr += chunk;
+    return true;
+  };
   process.env.AIP_COOLDOWN_PATH = path.join(temp, "cooldown.json");
   try {
     const result = await routeLlm({
@@ -472,7 +487,9 @@ test("exec gateway returns stdout and limit patterns advance to next route", asy
       "limit",
       "success",
     ]);
+    assert.match(stderr, /WARN gateway_limited gateway=limited model=a cooldownUntil=\d{4}-\d\d-\d\dT.*Z/);
   } finally {
+    process.stderr.write = priorWrite;
     if (prior === undefined) delete process.env.AIP_COOLDOWN_PATH;
     else process.env.AIP_COOLDOWN_PATH = prior;
     await rm(temp, { recursive: true, force: true });

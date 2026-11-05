@@ -3,6 +3,7 @@ import path from "node:path";
 import { openaiChat } from "./gateways/openai-chat.js";
 import { execGateway } from "./gateways/exec.js";
 import { atomicJson, exists, readJson } from "../io/files.js";
+import { log } from "../io/log.js";
 
 const DEFAULT_COOLDOWN = 60 * 60 * 1000;
 const activeCalls = new Map();
@@ -24,7 +25,15 @@ export async function routeLlm({ route, prompt, routes, gateways, attemptDir }) 
       const next = Math.min(
         ...entries.map((entry) => cooldowns[entry.gateway] ?? 0),
       );
-      await delay(Math.max(0, next - Date.now()));
+      const waitMs = Math.max(0, next - Date.now());
+      log("WARN", "route_wait", {
+        route,
+        cooldowns: entries.map((entry) =>
+          `${entry.gateway}=${new Date(cooldowns[entry.gateway] ?? 0).toISOString()}`
+        ).join(","),
+        waitMs,
+      });
+      await delay(waitMs);
       continue;
     }
     for (const entry of available) {
@@ -75,6 +84,11 @@ export async function routeLlm({ route, prompt, routes, gateways, attemptDir }) 
           DEFAULT_COOLDOWN;
         cooldowns[entry.gateway] = Date.now() + duration;
         await atomicJson(cooldownPath(), cooldowns);
+        log("WARN", "gateway_limited", {
+          gateway: entry.gateway,
+          model: entry.model,
+          cooldownUntil: new Date(cooldowns[entry.gateway]).toISOString(),
+        });
         tried.push({
           gateway: entry.gateway,
           model: entry.model,
