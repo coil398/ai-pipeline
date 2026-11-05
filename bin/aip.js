@@ -7,7 +7,7 @@ import { schedule } from "../src/engine/scheduler.js";
 import { acquireLease } from "../src/engine/lease.js";
 import { fixtureGateway } from "../src/llm/gateways/fixture.js";
 import { humanGateway } from "../src/llm/gateways/human.js";
-import { routeLlm } from "../src/llm/router.js";
+import { routeLlm, validatePeakHours } from "../src/llm/router.js";
 import { exists, readText } from "../src/io/files.js";
 import { log } from "../src/io/log.js";
 
@@ -135,6 +135,7 @@ async function runLoaded(loaded, runDir, state, parallel) {
   const gateways = await exists(gatewaysFile)
     ? JSON.parse(await readText(gatewaysFile))
     : {};
+  validatePeakHours(gateways);
   const fallbacksFile = path.resolve(
     option("--fallbacks", path.join(definitionDir, "fallbacks.json")),
   );

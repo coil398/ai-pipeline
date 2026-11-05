@@ -28,6 +28,51 @@ test("fallback expansion inherits effort, removes duplicates, and stops after on
     { gateway: "b", model: "n" },
   ]);
 });
+test("peak hours use UTC weekdays and include overnight windows on their start weekday", async () => {
+  const { isPeak } = await import("../src/llm/router.js");
+  const hours = [{ days: [1], start: "22:00", end: "02:00" }];
+  assert.equal(isPeak(hours, Date.UTC(2026, 10, 2, 22)), true); // Monday
+  assert.equal(isPeak(hours, Date.UTC(2026, 10, 3, 1, 59)), true);
+  assert.equal(isPeak(hours, Date.UTC(2026, 10, 3, 2)), false);
+  assert.equal(isPeak(hours, Date.UTC(2026, 10, 3, 0, 30)), true);
+  assert.equal(isPeak([{ days: [2], start: "01:00", end: "04:00" }], Date.UTC(2026, 10, 3, 1)), true);
+  assert.equal(isPeak([{ days: [2], start: "01:00", end: "04:00" }], Date.UTC(2026, 10, 3, 4)), false);
+});
+test("peak-hour gateway entries move behind off-peak entries with stable ordering", async (t) => {
+  const { routeLlm } = await import("../src/llm/router.js");
+  const temp = await tempRoot();
+  const prior = process.env.AIP_COOLDOWN_PATH;
+  process.env.AIP_COOLDOWN_PATH = path.join(temp, "cooldown.json");
+  t.after(async () => { if (prior === undefined) delete process.env.AIP_COOLDOWN_PATH; else process.env.AIP_COOLDOWN_PATH = prior; await rm(temp, { recursive: true, force: true }); });
+  const gateways = Object.fromEntries(["peak1", "off", "peak2"].map((gateway) => [gateway, {
+    kind: "exec", peakHours: gateway.startsWith("peak") ? [{ days: [1], start: "00:00", end: "23:59" }] : undefined,
+    argv: ["node", "-e", `process.stdin.resume();console.log('${gateway}')`],
+  }]));
+  const priorWrite = process.stderr.write; let stderr = ""; process.stderr.write = (chunk) => { stderr += chunk; return true; };
+  let result;
+  try {
+    result = await routeLlm({ route: "r", prompt: "p", routes: { r: ["peak1", "off", "peak2"].map((gateway) => ({ gateway, model: "m" })) }, gateways, now: () => Date.UTC(2026, 10, 2, 12) });
+  } finally { process.stderr.write = priorWrite; }
+  assert.equal(result.gateway, "off");
+  assert.match(stderr, /INFO route_offpeak_order route=r gateways=off,peak1,peak2/);
+  assert.equal((await routeLlm({ route: "r", prompt: "p", routes: { r: [{ gateway: "peak1", model: "m" }, { gateway: "peak2", model: "m" }] }, gateways, now: () => Date.UTC(2026, 10, 2, 12) })).gateway, "peak1");
+  assert.equal((await routeLlm({ route: "r", prompt: "p", routes: { r: [{ gateway: "off", model: "m" }, { gateway: "peak1", model: "m" }] }, gateways, now: () => Date.UTC(2026, 10, 2, 23, 59) })).gateway, "off");
+});
+test("peakHours validation rejects malformed windows", async () => {
+  const { validatePeakHours } = await import("../src/llm/router.js");
+  assert.throws(() => validatePeakHours({ a: { peakHours: [{ days: [7], start: "08:00", end: "09:00" }] } }), /invalid peakHours for gateway a/);
+});
+test("startup rejects malformed gateway peakHours", async (t) => {
+  const temp = await tempRoot();
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const dir = path.join(temp, "wf");
+  await workflow(dir);
+  await writeFile(path.join(dir, "gateways.json"), JSON.stringify({ first: { kind: "exec", argv: ["true"], peakHours: [{ days: [1], start: "25:00", end: "04:00" }] } }));
+  await assert.rejects(run([
+    "run", path.join(dir, "workflow.json"), "--run-id", "invalid-peak",
+    "--runs-dir", path.join(temp, "runs"),
+  ]), /invalid peakHours for gateway first/);
+});
 test("openai chat assembles split SSE content and usage, stopping at DONE", async () => {
   const { openaiChat } = await import("../src/llm/gateways/openai-chat.js");
   const priorFetch = globalThis.fetch;

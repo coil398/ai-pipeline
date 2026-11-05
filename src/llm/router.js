@@ -12,12 +12,23 @@ const cooldownPath = () =>
     path.join(os.homedir(), ".cache", "ai-pipeline", "cooldown.json");
 
 /** @param {{route:string,prompt:string,routes:Record<string,Array<{gateway:string,model:string,effort?:string}>>,gateways:Record<string,any>,attemptDir?:string}} options */
-export async function routeLlm({ route, prompt, routes, gateways, fallbacks = {}, attemptDir }) {
+export async function routeLlm({ route, prompt, routes, gateways, fallbacks = {}, attemptDir, now = () => Date.now() }) {
   const routeEntries = routes[route];
-  const entries = routeEntries?.length
+  let entries = routeEntries?.length
     ? expandRouteEntries(routeEntries, fallbacks)
     : routeEntries;
   if (!entries?.length) throw new Error(`unknown route: ${route}`);
+  const originalEntries = entries;
+  const callTime = now();
+  const reordered = entries.filter((entry) => !isPeak(gateways[entry.gateway]?.peakHours, callTime))
+    .concat(entries.filter((entry) => isPeak(gateways[entry.gateway]?.peakHours, callTime)));
+  if (reordered[0] !== originalEntries[0]) {
+    log("INFO", "route_offpeak_order", {
+      route,
+      gateways: reordered.map((entry) => entry.gateway).join(","),
+    });
+  }
+  entries = reordered;
   const tried = [];
   for (;;) {
     const cooldowns = await loadCooldowns();
@@ -102,6 +113,39 @@ export async function routeLlm({ route, prompt, routes, gateways, fallbacks = {}
       }
     }
   }
+}
+
+export function isPeak(peakHours, dateOrMillis) {
+  if (!peakHours?.length) return false;
+  const date = dateOrMillis instanceof Date ? dateOrMillis : new Date(dateOrMillis);
+  const day = date.getUTCDay();
+  const minute = date.getUTCHours() * 60 + date.getUTCMinutes();
+  return peakHours.some(({ days, start, end }) => {
+    const startMinute = Number(start.slice(0, 2)) * 60 + Number(start.slice(3));
+    const endMinute = Number(end.slice(0, 2)) * 60 + Number(end.slice(3));
+    return startMinute < endMinute
+      ? days.includes(day) && minute >= startMinute && minute < endMinute
+      : minute >= startMinute && days.includes(day) || minute < endMinute && days.includes((day + 6) % 7);
+  });
+}
+
+export function validatePeakHours(gateways) {
+  for (const [name, gateway] of Object.entries(gateways)) {
+    if (gateway.peakHours === undefined) continue;
+    if (!Array.isArray(gateway.peakHours)) throw new Error(`gateway ${name} peakHours must be an array`);
+    for (const window of gateway.peakHours) {
+      if (!window || typeof window !== "object" || Array.isArray(window) ||
+        !Array.isArray(window.days) ||
+        window.days.some((day) => !Number.isInteger(day) || day < 0 || day > 6) ||
+        !validUtcTime(window.start) || !validUtcTime(window.end)) {
+        throw new Error(`invalid peakHours for gateway ${name}`);
+      }
+    }
+  }
+}
+
+function validUtcTime(value) {
+  return typeof value === "string" && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value);
 }
 
 export function expandRouteEntries(entries, fallbacks) {
