@@ -206,6 +206,37 @@ test("transient route failure advances to the next entry and records the outcome
   assert.equal(result.text.trim(), "ok");
   assert.deepEqual(result.tried.map(({ gateway, result: outcome }) => [gateway, outcome]), [["broken", "transient"], ["ok", "success"]]);
 });
+test("HTTP request timeout advances to the next route entry", async (t) => {
+  const { routeLlm } = await import("../src/llm/router.js");
+  const temp = await tempRoot();
+  const prior = process.env.AIP_COOLDOWN_PATH;
+  const priorFetch = globalThis.fetch;
+  process.env.AIP_COOLDOWN_PATH = path.join(temp, "cooldown.json");
+  globalThis.fetch = async (_url, { signal }) => new Promise((_resolve, reject) => {
+    signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+  });
+  t.after(() => { globalThis.fetch = priorFetch; });
+  t.after(async () => { if (prior === undefined) delete process.env.AIP_COOLDOWN_PATH; else process.env.AIP_COOLDOWN_PATH = prior; await rm(temp, { recursive: true, force: true }); });
+  const result = await routeLlm({ route: "r", prompt: "p", routes: { r: [{ gateway: "slow", model: "m" }, { gateway: "ok", model: "m" }] }, gateways: {
+    slow: { kind: "openai-chat", baseUrl: "http://unused", apiKeyEnv: "", timeoutMs: 5, idleTimeoutMs: 0 },
+    ok: { kind: "exec", argv: [process.execPath, "-e", "console.log('after timeout')"] },
+  } });
+  assert.equal(result.text.trim(), "after timeout");
+  assert.deepEqual(result.tried.map(({ gateway, result: outcome }) => [gateway, outcome]), [["slow", "transient"], ["ok", "success"]]);
+});
+test("exec timeout advances to the next route entry", async (t) => {
+  const { routeLlm } = await import("../src/llm/router.js");
+  const temp = await tempRoot();
+  const prior = process.env.AIP_COOLDOWN_PATH;
+  process.env.AIP_COOLDOWN_PATH = path.join(temp, "cooldown.json");
+  t.after(async () => { if (prior === undefined) delete process.env.AIP_COOLDOWN_PATH; else process.env.AIP_COOLDOWN_PATH = prior; await rm(temp, { recursive: true, force: true }); });
+  const result = await routeLlm({ route: "r", prompt: "p", routes: { r: [{ gateway: "slow", model: "m" }, { gateway: "ok", model: "m" }] }, gateways: {
+    slow: { kind: "exec", argv: [process.execPath, "-e", "setInterval(()=>{},1000)"], timeoutMs: 5 },
+    ok: { kind: "exec", argv: [process.execPath, "-e", "console.log('after timeout')"] },
+  } });
+  assert.equal(result.text.trim(), "after timeout");
+  assert.deepEqual(result.tried.map(({ gateway, result: outcome }) => [gateway, outcome]), [["slow", "transient"], ["ok", "success"]]);
+});
 test("all transient route failures throw with every entry recorded", async (t) => {
   const { routeLlm } = await import("../src/llm/router.js");
   const temp = await tempRoot();
@@ -558,6 +589,18 @@ test("limit advances from a route entry to its configured fallback", async (t) =
     ["limited", "limit"], ["ok", "success"],
   ]);
 });
+test("exec fallback does not read output left by the preceding limited route", async (t) => {
+  const { routeLlm } = await import("../src/llm/router.js");
+  const temp = await tempRoot();
+  const prior = process.env.AIP_COOLDOWN_PATH;
+  process.env.AIP_COOLDOWN_PATH = path.join(temp, "cooldown.json");
+  t.after(async () => { if (prior === undefined) delete process.env.AIP_COOLDOWN_PATH; else process.env.AIP_COOLDOWN_PATH = prior; await rm(temp, { recursive: true, force: true }); });
+  const result = await routeLlm({ route: "r", prompt: "p", routes: { r: [{ gateway: "limited", model: "m" }, { gateway: "ok", model: "m" }] }, gateways: {
+    limited: { kind: "exec", argv: [process.execPath, "-e", "require('node:fs').writeFileSync('response.md','A stale output');console.log('limit');process.exit(1)"], outputFile: "response.md", limitPatterns: ["limit"] },
+    ok: { kind: "exec", argv: [process.execPath, "-e", "console.log('B fresh output')"], outputFile: "response.md" },
+  }, attemptDir: path.join(temp, "attempt") });
+  assert.equal(result.text.trim(), "B fresh output");
+});
 test("cooldown route is skipped and expired route is selected after earliest cooldown wait", async () => {
   const { routeLlm } = await import("../src/llm/router.js");
   const temp = await tempRoot();
@@ -710,7 +753,7 @@ test("exec gateway terminates timed out child processes", async () => {
         ],
         timeoutMs: 500,
       }, { model: "m", prompt: "p", attemptDir }),
-      (error) => error.kind === "timeout",
+      (error) => error.kind === "transient",
     );
     assert.equal(
       await readFile(path.join(attemptDir, "work", "terminated"), "utf8"),

@@ -193,7 +193,7 @@ async function runLoaded(loaded, runDir, state, parallel) {
       "steps",
     );
     gateway = async ({ step, version, dir }) => {
-      const relative = path.relative(runDir, dir);
+      const relative = path.relative(path.join(runDir, "steps"), dir);
       const file = path.join(source, relative, "output.md");
       if (!await exists(file)) {
         throw new Error(`stopped: fixture-missing ${file}`);

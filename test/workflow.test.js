@@ -56,6 +56,26 @@ test("review loop passes FAIL to revise and completes on PASS", async (t) => {
     /VERDICT: FAIL/,
   );
 });
+test("run replay reads saved outputs from the source run steps directory", async (t) => {
+  const temp = await setup();
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const dir = path.join(temp, "wf");
+  await mkdir(dir);
+  await writeFile(path.join(dir, "role.md"), "Respond.");
+  const workflow = path.join(dir, "workflow.json");
+  await writeFile(workflow, JSON.stringify({ id: "replay", inputs: {}, steps: [
+    textStep("write", [], "result", []),
+  ] }));
+  const runs = path.join(temp, "runs");
+  const fixture = path.join(temp, "fixture");
+  await mkdir(fixture);
+  await writeFile(path.join(fixture, "write.md"), "saved output");
+  run(["run", workflow, "--run-id", "source", ...opts(runs), "--llm", fixture]);
+  run(["run", workflow, "--run-id", "replay", ...opts(runs), "--llm", "run:source"]);
+  const state = JSON.parse(await readFile(path.join(runs, "replay/state.json"), "utf8"));
+  assert.equal(state.status, "completed", state.error);
+  assert.equal(await readFile(state.artifacts.result.path, "utf8"), "saved output");
+});
 test("map validates nested ids, inputs, and control flow", () => {
   const base = { id: "map-flow", inputs: { parts: "parts.json", draft: "draft.md" }, steps: [
     { id: "map", kind: "map", items: "parts", itemArtifact: "part", output: "plans", steps: [
@@ -147,6 +167,33 @@ test("map continue retries only failed iterations", async (t) => {
   assert.deepEqual(JSON.parse(await readFile(result.state.artifacts.results.path, "utf8")), [
     "result:1", "result:2", "result:3",
   ]);
+});
+test("map does not reuse an item whose final exec wrote output then failed", async (t) => {
+  const temp = await setup();
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const items = path.join(temp, "items.json");
+  const failedFlag = path.join(temp, "failed-once");
+  const countsFile = path.join(temp, "counts.json");
+  await writeFile(items, '["retry","success"]');
+  let retryCalls = 0;
+  const definition = { id: "map-retry", inputs: { items: "items.json" }, steps: [{
+    id: "map", kind: "map", items: "items", itemArtifact: "item", output: "results", steps: [{
+      id: "render", kind: "exec", inputs: ["item"], outputs: ["rendered"], argv: [process.execPath, "-e",
+        `const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.env.AIP_MANIFEST));const item=JSON.parse(fs.readFileSync(m.inputs.item.path));const counts=fs.existsSync(${JSON.stringify(countsFile)})?JSON.parse(fs.readFileSync(${JSON.stringify(countsFile)})):{};counts[item]=(counts[item]||0)+1;fs.writeFileSync(${JSON.stringify(countsFile)},JSON.stringify(counts));fs.writeFileSync(m.outputs.rendered,item==="retry"?"partial":"complete");if(item==="retry"&&!fs.existsSync(${JSON.stringify(failedFlag)})){fs.writeFileSync(${JSON.stringify(failedFlag)},"1");process.exit(1)}`,
+      ],
+    }],
+  }] };
+  const state = await initializeState(temp, definition, "", { items });
+  const gateway = async () => { retryCalls++; return "unused"; };
+  await schedule({ definition, definitionDir: temp, runDir: temp, state, gateway });
+  assert.equal(state.status, "failed");
+  assert.deepEqual(JSON.parse(await readFile(countsFile, "utf8")), { retry: 1, success: 1 });
+  await schedule({ definition, definitionDir: temp, runDir: temp, state, gateway });
+  assert.equal(state.status, "completed", state.error);
+  assert.equal(retryCalls, 0);
+  assert.deepEqual(JSON.parse(await readFile(state.artifacts.results.path, "utf8")), ["partial", "complete"]);
+  assert.deepEqual(JSON.parse(await readFile(countsFile, "utf8")), { retry: 2, success: 1 });
+  assert.deepEqual((await readdir(path.join(temp, "steps/map/v1/items"))).sort(), ["0", "1"]);
 });
 test("completed map reached again uses a new version and reruns all items", async (t) => {
   const result = await runMap(t, ["x", "y"]);
@@ -243,6 +290,23 @@ test("failed command resumes after definition repair", async (t) => {
   s = JSON.parse(await readFile(path.join(runs, "retry/state.json"), "utf8"));
   assert.equal(s.status, "completed", s.error);
   assert.equal(s.steps.added.attempts, 2);
+});
+test("failed exec stores stderr tail and stderr.log path in run state", async (t) => {
+  const temp = await setup();
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const dir = path.join(temp, "wf");
+  await mkdir(dir);
+  const wf = path.join(dir, "workflow.json");
+  await writeFile(wf, JSON.stringify({ id: "stderr", inputs: {}, steps: [{
+    id: "fail", kind: "exec", argv: [process.execPath, "-e", "console.error('useful failure detail');process.exit(1)"], outputs: [],
+  }] }));
+  const runs = path.join(temp, "runs");
+  run(["run", wf, "--run-id", "stderr", ...opts(runs)], 1);
+  const state = JSON.parse(await readFile(path.join(runs, "stderr/state.json"), "utf8"));
+  assert.equal(state.status, "failed");
+  assert.match(state.error, /useful failure detail/);
+  assert.match(state.error, /stderr\/steps\/fail\/v1\/a1\/stderr\.log/);
+  assert.equal(await readFile(path.join(runs, "stderr/steps/fail/v1/a1/stderr.log"), "utf8"), "useful failure detail\n");
 });
 test("definition rejects unresolved inputs and unknown goto", () => {
   assert.throws(
@@ -507,12 +571,55 @@ test("waitFor ignores completions from before a failed join rerun", async (t) =>
   state.sequence = 3;
   state.steps.a.completedSequence = 1;
   state.steps.b.completedSequence = 2;
+  state.steps.join.status = "completed";
   state.steps.join.completedSequence = 1;
   state.steps.join.startedSequence = 3;
   await schedule({ definition, definitionDir: temp, runDir: temp, state, gateway: async () => "ok" });
   assert.equal(state.steps.join.attempts, 0);
   assert.equal(state.status, "waiting-input");
   assert.deepEqual(state.frontier, ["b", "join"]);
+});
+
+test("failed join continues after upstream completion and rerun --from join runs it again", async (t) => {
+  const temp = await setup();
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const dir = path.join(temp, "wf");
+  await mkdir(dir);
+  await writeFile(path.join(dir, "role.md"), "Respond.");
+  const wf = path.join(dir, "workflow.json");
+  const definition = { id: "join-retry", inputs: {}, steps: [
+    command("start", ["a", "b"]), command("a", ["join"]), command("b", ["join"]),
+    { ...textStep("join", [], "joined", ["after"]), waitFor: ["a", "b"] },
+    command("after", []),
+  ] };
+  await writeFile(wf, JSON.stringify(definition));
+  const runs = path.join(temp, "runs");
+  const fixture = path.join(temp, "fixture");
+  await mkdir(fixture);
+  run(["run", wf, "--run-id", "join", ...opts(runs), "--llm", fixture], 1);
+  let state = JSON.parse(await readFile(path.join(runs, "join/state.json"), "utf8"));
+  assert.match(state.status, /^(failed|stopped: fixture-missing)/);
+  assert.equal(state.steps.join.status, "failed");
+  assert.equal(state.steps.a.status, "completed");
+  assert.equal(state.steps.b.status, "completed");
+  await writeFile(path.join(fixture, "join.md"), "joined");
+  run(["continue", "--run-id", "join", ...opts(runs), "--llm", fixture]);
+  state = JSON.parse(await readFile(path.join(runs, "join/state.json"), "utf8"));
+  assert.equal(state.status, "completed", state.error);
+  assert.equal(state.steps.join.attempts, 2);
+  assert.equal(state.steps.after.attempts, 1);
+
+  const rerunFixture = path.join(temp, "rerun-fixture");
+  await mkdir(rerunFixture);
+  run(["run", wf, "--run-id", "rerun", ...opts(runs), "--llm", rerunFixture], 1);
+  state = JSON.parse(await readFile(path.join(runs, "rerun/state.json"), "utf8"));
+  assert.equal(state.steps.join.status, "failed");
+  await writeFile(path.join(rerunFixture, "join.md"), "joined");
+  run(["rerun", "--run-id", "rerun", "--from", "join", ...opts(runs), "--llm", rerunFixture]);
+  state = JSON.parse(await readFile(path.join(runs, "rerun/state.json"), "utf8"));
+  assert.equal(state.status, "completed", state.error);
+  assert.equal(state.steps.join.attempts, 2);
+  assert.equal(state.steps.after.attempts, 1);
 });
 
 test("waitFor activates a join once before advancing its decision", async (t) => {

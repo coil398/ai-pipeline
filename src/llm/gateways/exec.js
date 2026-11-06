@@ -10,6 +10,7 @@ export async function execGateway(gateway, request) {
     : await mkdtemp(path.join(os.tmpdir(), "aip-exec-"));
   const attemptDir = request.attemptDir ?? temporaryAttemptDir;
   const workdir = path.resolve(attemptDir, "work");
+  await rm(workdir, { recursive: true, force: true });
   await mkdir(workdir, { recursive: true });
   const argv = gateway.argv.map((value) =>
     value.replaceAll("{model}", request.model).replaceAll(
@@ -54,7 +55,7 @@ export async function execGateway(gateway, request) {
           const error = /** @type {any} */ (new Error(
             `exec gateway timed out after ${gateway.timeoutMs}ms`,
           ));
-          error.kind = "timeout";
+          error.kind = "transient";
           return reject(error);
         }
         const output = `${stdout}\n${stderr}`;

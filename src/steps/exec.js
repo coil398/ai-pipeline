@@ -15,7 +15,12 @@ export function runExec({ argv, cwd, env, stderrFile }) {
     child.on("close", async (code) => {
       const { writeFile } = await import("node:fs/promises");
       await writeFile(stderrFile, stderr);
-      if (code !== 0) reject(new Error(`exec exited ${code}: ${argv[0]}`));
+      if (code !== 0) {
+        const tail = stderr.slice(-500);
+        reject(new Error(
+          `exec exited ${code}: ${argv[0]}${tail ? `: ${tail}` : ""}; stderr log: ${stderrFile}`,
+        ));
+      }
       else resolve();
     });
   });

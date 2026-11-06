@@ -1,6 +1,6 @@
 import path from "node:path";
 import { readdir } from "node:fs/promises";
-import { copyFile, writeFile } from "node:fs/promises";
+import { copyFile, rename, rm, writeFile } from "node:fs/promises";
 import { atomicJson, ensureDir, exists, readText } from "../io/files.js";
 import { renderPrompt, runLlm } from "../steps/llm.js";
 import { runExec } from "../steps/exec.js";
@@ -31,9 +31,11 @@ export async function schedule(
         const step = definition.steps.find((item) => item.id === id);
         const record = state.steps[id];
         if (!(await allInputsExist(step, state))) continue;
+        const waitSequence = record.status === "completed"
+          ? (record.startedSequence ?? record.completedSequence ?? 0)
+          : (record.completedSequence ?? 0);
         if (!(step.waitFor ?? []).every((source) =>
-          (state.steps[source].completedSequence ?? 0) >
-            (record.startedSequence ?? record.completedSequence ?? 0)
+          (state.steps[source].completedSequence ?? 0) > waitSequence
         )) continue;
         if (step.kind === "decide") {
           if (!batch.length) batch.push(step);
@@ -289,9 +291,10 @@ async function executeMap({ step, version, definition, definitionDir, runDir, st
     while (!firstError) {
       const index = cursor++;
       if (index >= values.length) return;
-      const itemRoot = path.join(root, String(index));
+      const completedItemRoot = path.join(root, String(index));
+      const runningItemRoot = `${completedItemRoot}.running`;
       const last = step.steps.at(-1);
-      const lastOutput = path.join(
+      const lastOutput = (itemRoot) => path.join(
         itemRoot,
         last.id,
         "a1",
@@ -299,12 +302,14 @@ async function executeMap({ step, version, definition, definitionDir, runDir, st
         ...(last.kind === "llm" ? [] : [last.outputs.at(-1)]),
       );
       const started = Date.now();
-      if (await exists(lastOutput)) {
-        results[index] = await readText(lastOutput);
+      if (await exists(completedItemRoot)) {
+        results[index] = await readText(lastOutput(completedItemRoot));
         continue;
       }
       log("INFO", "map_item_start", { run_id: state.runId, step_id: step.id, index });
       try {
+        await rm(runningItemRoot, { recursive: true, force: true });
+        const itemRoot = runningItemRoot;
         const artifacts = {
           [step.itemArtifact]: {
             path: path.join(itemRoot, "artifacts", step.itemArtifact),
@@ -346,7 +351,8 @@ async function executeMap({ step, version, definition, definitionDir, runDir, st
             artifacts[id] = { path: path.join(itemRoot, "artifacts", id) };
           }
         }
-        results[index] = await readText(lastOutput);
+        results[index] = await readText(lastOutput(itemRoot));
+        await rename(runningItemRoot, completedItemRoot);
         log("INFO", "map_item_done", { run_id: state.runId, step_id: step.id, index, inner_step_id: last.id, elapsed_ms: Date.now() - started });
       } catch (error) {
         firstError ??= error;

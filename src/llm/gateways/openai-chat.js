@@ -14,6 +14,7 @@ export async function openaiChat(gateway, request) {
   const idleTimeoutMs = gateway.idleTimeoutMs ?? 300_000;
   let idleTimer;
   let idleTimedOut = false;
+  let timedOut = false;
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = idleTimeoutMs > 0
@@ -25,7 +26,10 @@ export async function openaiChat(gateway, request) {
   };
   resetIdleTimer();
   const timer = gateway.timeoutMs
-    ? setTimeout(() => controller.abort(), gateway.timeoutMs)
+    ? setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, gateway.timeoutMs)
     : undefined;
   const requestId = randomUUID();
   try {
@@ -99,6 +103,7 @@ export async function openaiChat(gateway, request) {
       transient.kind = "transient";
       throw transient;
     }
+    if (timedOut && error && typeof error === "object") error.kind = "transient";
     if (isFetchCommunicationError(error)) error.kind = "transient";
     throw error;
   } finally {
