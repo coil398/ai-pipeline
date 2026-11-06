@@ -102,6 +102,12 @@ async function main() {
     return withLease(runDir, async () => {
       const state = await loadState(runDir, loaded.definition);
       state.frontier = [start];
+      for (const step of loaded.definition.steps.slice(startIndex)) {
+        const record = state.steps[step.id];
+        delete record.pendingSelection;
+        delete record.reactivated;
+        delete record.waitBaseline;
+      }
       for (const id of Object.keys(state.rounds)) state.rounds[id] = {};
       state.status = "running";
       delete state.error;
@@ -193,7 +199,13 @@ async function runLoaded(loaded, runDir, state, parallel) {
       "steps",
     );
     gateway = async ({ step, version, dir }) => {
-      const relative = path.relative(path.join(runDir, "steps"), dir);
+      const relativeParts = path.relative(path.join(runDir, "steps"), dir).split(path.sep);
+      for (let index = 0; index < relativeParts.length - 1; index++) {
+        if (relativeParts[index] === "items" && /^\d+\.running$/.test(relativeParts[index + 1])) {
+          relativeParts[index + 1] = relativeParts[index + 1].replace(/\.running$/, "");
+        }
+      }
+      const relative = path.join(...relativeParts);
       const file = path.join(source, relative, "output.md");
       if (!await exists(file)) {
         throw new Error(`stopped: fixture-missing ${file}`);

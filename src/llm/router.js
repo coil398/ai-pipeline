@@ -71,11 +71,32 @@ export async function routeLlm({ route, prompt, routes, gateways, fallbacks = {}
             skipped.kind = "cooldown";
             throw skipped;
           }
-          return gateway.kind === "openai-chat"
-            ? openaiChat(gateway, { ...entry, prompt })
-            : gateway.kind === "exec"
-            ? execGateway(gateway, { ...entry, prompt, attemptDir })
-            : Promise.reject(new Error(`unsupported gateway kind: ${gateway.kind}`));
+          try {
+            return await (gateway.kind === "openai-chat"
+              ? openaiChat(gateway, { ...entry, prompt })
+              : gateway.kind === "exec"
+              ? execGateway(gateway, { ...entry, prompt, attemptDir })
+              : Promise.reject(new Error(`unsupported gateway kind: ${gateway.kind}`)));
+          } catch (error) {
+            if (error.kind === "limit") {
+              const duration = error.retryAfterMs ?? gateway.cooldownMs ?? DEFAULT_COOLDOWN;
+              const file = cooldownPath();
+              await mkdir(path.dirname(file), { recursive: true });
+              const release = await acquireCooldownLease(`${file}.lease`);
+              try {
+                const latest = await loadCooldowns();
+                latest[entry.gateway] = Math.max(
+                  latest[entry.gateway] ?? 0,
+                  Date.now() + duration,
+                );
+                await atomicJson(file, latest);
+                error.cooldownUntil = latest[entry.gateway];
+              } finally {
+                await release();
+              }
+            }
+            throw error;
+          }
         };
         const result = gateway.kind === "openai-chat"
           ? await withParallel(
@@ -138,24 +159,10 @@ export async function routeLlm({ route, prompt, routes, gateways, fallbacks = {}
           error.tried = tried;
           throw error;
         }
-        const duration = error.retryAfterMs ?? gateway.cooldownMs ??
-          DEFAULT_COOLDOWN;
-        cooldowns[entry.gateway] = Date.now() + duration;
-        const file = cooldownPath();
-        await mkdir(path.dirname(file), { recursive: true });
-        const release = await acquireCooldownLease(`${file}.lease`);
-        try {
-          const latest = await loadCooldowns();
-          latest[entry.gateway] = Math.max(latest[entry.gateway] ?? 0, cooldowns[entry.gateway]);
-          Object.assign(cooldowns, latest);
-          await atomicJson(file, latest);
-        } finally {
-          await release();
-        }
         log("WARN", "gateway_limited", {
           gateway: entry.gateway,
           model: entry.model,
-          cooldownUntil: new Date(cooldowns[entry.gateway]).toISOString(),
+          cooldownUntil: new Date(error.cooldownUntil).toISOString(),
         });
         tried.push({
           gateway: entry.gateway,

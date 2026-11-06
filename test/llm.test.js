@@ -169,6 +169,41 @@ test("concurrent cooldown updates merge under a lease and remove it afterward", 
   await assert.rejects(readFile(`${cooldown}.lease`), { code: "ENOENT" });
 });
 
+test("a limited request saves cooldown before releasing its parallel slot", async (t) => {
+  const { routeLlm } = await import("../src/llm/router.js");
+  const temp = await tempRoot(); const cooldown = path.join(temp, "cooldown.json");
+  const priorPath = process.env.AIP_COOLDOWN_PATH; process.env.AIP_COOLDOWN_PATH = cooldown;
+  const priorFetch = globalThis.fetch;
+  t.after(async () => { globalThis.fetch = priorFetch; if (priorPath === undefined) delete process.env.AIP_COOLDOWN_PATH; else process.env.AIP_COOLDOWN_PATH = priorPath; await rm(temp, { recursive: true, force: true }); });
+  let sharedRequests = 0; let releaseFirst; let markStarted;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  globalThis.fetch = async url => {
+    if (new URL(url).hostname === "shared") {
+      sharedRequests++;
+      if (sharedRequests === 1) {
+        markStarted();
+        await new Promise(resolve => { releaseFirst = resolve; });
+        return { ok: false, status: 429, headers: { get: () => "0.1" }, text: async () => "" };
+      }
+    }
+    return { ok: true, status: 200, headers: { get: () => "application/json" }, json: async () => ({ choices: [{ message: { content: "ok" } }], usage: {} }) };
+  };
+  const gateways = {
+    shared: { kind: "openai-chat", baseUrl: "http://shared", maxParallel: 1 },
+    fallback: { kind: "openai-chat", baseUrl: "http://fallback" },
+  };
+  const entry = gateway => ({ gateway, model: "m" });
+  const first = routeLlm({ route: "first", prompt: "p", routes: { first: [entry("shared")] }, gateways });
+  await started;
+  const second = routeLlm({ route: "second", prompt: "p", routes: { second: [entry("shared"), entry("fallback")] }, gateways });
+  await new Promise(resolve => setTimeout(resolve, 10));
+  releaseFirst();
+  const secondResult = await second;
+  await first;
+  assert.equal(secondResult.gateway, "fallback");
+  assert.equal(sharedRequests, 2);
+});
+
 test("gateway cooldown is rechecked after waiting for a parallel slot", async (t) => {
   const { routeLlm } = await import("../src/llm/router.js");
   const temp = await tempRoot(); const cooldown = path.join(temp, "cooldown.json");

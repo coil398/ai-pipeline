@@ -1,4 +1,5 @@
-import { open, readFile, unlink } from "node:fs/promises";
+import { link, readFile, unlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 
 const process = /** @type {any} */ (globalThis).process;
@@ -8,11 +9,12 @@ export async function acquireLease(file) {
     host: os.hostname(),
     startedAt: new Date().toISOString(),
   };
+  const temp = `${file}.${randomUUID()}.tmp`;
+  await writeFile(temp, JSON.stringify(owner));
   try {
-    const handle = await open(file, "wx");
-    await handle.writeFile(JSON.stringify(owner));
-    await handle.close();
+    await link(temp, file);
   } catch (error) {
+    await unlink(temp);
     if (error.code !== "EEXIST") throw error;
     try {
       const current = JSON.parse(await readFile(file, "utf8"));
@@ -40,6 +42,7 @@ export async function acquireLease(file) {
     }
     throw new Error(`run is leased: ${file}`);
   }
+  await unlink(temp);
   return async () => {
     await unlink(file);
   };

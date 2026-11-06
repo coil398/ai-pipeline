@@ -31,9 +31,9 @@ export async function schedule(
         const step = definition.steps.find((item) => item.id === id);
         const record = state.steps[id];
         if (!(await allInputsExist(step, state))) continue;
-        const waitSequence = record.status === "completed"
+        const waitSequence = record.waitBaseline ?? (record.status === "completed"
           ? (record.startedSequence ?? record.completedSequence ?? 0)
-          : (record.completedSequence ?? 0);
+          : (record.completedSequence ?? 0));
         if (!(step.waitFor ?? []).every((source) =>
           (state.steps[source].completedSequence ?? 0) > waitSequence
         )) continue;
@@ -43,6 +43,9 @@ export async function schedule(
         }
         const outputs = step.kind === "map" ? [step.output] : step.outputs ?? [step.output];
         if (outputs.some((output) => claimedOutputs.has(output))) continue;
+        if (step.waitFor?.length && record.waitBaseline === undefined) {
+          record.waitBaseline = waitSequence;
+        }
         batch.push(step);
         for (const output of outputs) claimedOutputs.add(output);
         if (batch.length >= parallel) break;
@@ -89,6 +92,7 @@ export async function schedule(
           record.status = "completed";
           record.completedAt = new Date().toISOString();
           record.completedSequence = ++state.sequence;
+          delete record.waitBaseline;
           active.delete(step.id);
           const reactivated = Boolean(record.reactivated);
           delete record.reactivated;
