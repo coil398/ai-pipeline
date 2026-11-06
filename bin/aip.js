@@ -102,7 +102,7 @@ async function main() {
     return withLease(runDir, async () => {
       const state = await loadState(runDir, loaded.definition);
       state.frontier = [start];
-      for (const step of loaded.definition.steps.slice(startIndex)) {
+      for (const step of loaded.definition.steps) {
         const record = state.steps[step.id];
         delete record.pendingSelection;
         delete record.reactivated;

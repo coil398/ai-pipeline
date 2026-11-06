@@ -711,7 +711,7 @@ test("failed join retry keeps the wait baseline from its launch", async (t) => {
   assert.equal(Object.hasOwn(state.steps.join, "waitBaseline"), false);
 });
 
-test("rerun clears scheduling state from the selected step onward while continue retains it", async (t) => {
+test("rerun clears scheduling state from every step while continue retains it", async (t) => {
   const temp = await setup(); t.after(() => rm(temp, { recursive: true, force: true }));
   const dir = path.join(temp, "wf"); await mkdir(dir);
   await writeFile(path.join(dir, "role.md"), "Respond.");
@@ -726,14 +726,14 @@ test("rerun clears scheduling state from the selected step onward while continue
   let state = JSON.parse(await readFile(statePath, "utf8"));
   state.sequence = 5;
   state.steps.before.completedSequence = 5;
-  for (const id of ["target", "later"]) Object.assign(state.steps[id], {
+  for (const id of ["before", "target", "later"]) Object.assign(state.steps[id], {
     pendingSelection: { selected: "stale", index: 0 }, reactivated: true, waitBaseline: 17,
   });
   await writeFile(statePath, JSON.stringify(state));
   run(["rerun", "--run-id", "rerun-state", "--from", "target", ...opts(runs), "--llm", fixture]);
   state = JSON.parse(await readFile(statePath, "utf8"));
   assert.equal(state.status, "completed", state.error);
-  for (const id of ["target", "later"]) for (const key of ["pendingSelection", "reactivated", "waitBaseline"]) {
+  for (const id of ["before", "target", "later"]) for (const key of ["pendingSelection", "reactivated", "waitBaseline"]) {
     assert.equal(Object.hasOwn(state.steps[id], key), false, `${id}.${key}`);
   }
 
@@ -747,6 +747,30 @@ test("rerun clears scheduling state from the selected step onward while continue
   assert.deepEqual(state.steps.later.pendingSelection, { selected: "preserve", index: 2 });
   assert.equal(state.steps.later.reactivated, true);
   assert.equal(state.steps.later.waitBaseline, 23);
+});
+
+test("rerun clears a stale pending selection on a step reached by a backward route", async (t) => {
+  const temp = await setup(); t.after(() => rm(temp, { recursive: true, force: true }));
+  const dir = path.join(temp, "wf"); await mkdir(dir);
+  const choice = path.join(dir, "choice.md"); await writeFile(choice, "VERDICT: fresh\n");
+  const workflow = path.join(dir, "workflow.json");
+  const definition = { id: "rerun-backward-selection", inputs: { choice: "choice.md" }, steps: [
+    { id: "decision", kind: "decide", source: "choice", cases: [
+      { when: ["fresh"], goto: "fresh" }, { when: ["stale"], goto: "stale" },
+    ] },
+    command("target", ["decision"]), command("stale", []), command("fresh", []),
+  ] };
+  await writeFile(workflow, JSON.stringify(definition));
+  const runs = path.join(temp, "runs"); const fixture = path.join(temp, "fixture"); await mkdir(fixture);
+  run(["run", workflow, "--run-id", "backward-selection", ...opts(runs), "--llm", fixture]);
+  const statePath = path.join(runs, "backward-selection/state.json");
+  const state = JSON.parse(await readFile(statePath, "utf8"));
+  state.steps.decision.pendingSelection = { selected: "stale", index: 1 };
+  await writeFile(statePath, JSON.stringify(state));
+  run(["rerun", "--run-id", "backward-selection", "--from", "target", ...opts(runs), "--llm", fixture]);
+  const rerunState = JSON.parse(await readFile(statePath, "utf8"));
+  assert.equal(rerunState.status, "completed", rerunState.error);
+  assert.equal(rerunState.steps.decision.selected, "fresh");
 });
 
 test("waitFor activates a join once before advancing its decision", async (t) => {
