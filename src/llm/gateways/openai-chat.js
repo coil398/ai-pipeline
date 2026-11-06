@@ -68,16 +68,22 @@ export async function openaiChat(gateway, request) {
       const safeResponseText = apiKey
         ? responseText.replaceAll(apiKey, "[REDACTED]")
         : responseText;
-      throw new Error(
+      const error = new Error(
         `HTTP ${response.status}${safeResponseText ? `: ${safeResponseText}` : ""}`,
       );
+      if (response.status === 408 || response.status >= 500) error.kind = "transient";
+      throw error;
     }
     const contentType = response.headers?.get("content-type") ?? "";
     const body = contentType.includes("text/event-stream")
       ? await readEventStream(response.body, resetIdleTimer)
       : await response.json();
     const text = body.text ?? body.choices?.[0]?.message?.content ?? "";
-    if (!text.trim()) throw new Error("empty response");
+    if (!text.trim()) {
+      const error = new Error("empty response");
+      error.kind = "transient";
+      throw error;
+    }
     const usage = body.usage ?? {};
     return {
       text,
@@ -88,12 +94,28 @@ export async function openaiChat(gateway, request) {
       },
     };
   } catch (error) {
-    if (idleTimedOut) throw new Error(`stream idle for ${idleTimeoutMs}ms`);
+    if (idleTimedOut) {
+      const transient = new Error(`stream idle for ${idleTimeoutMs}ms`);
+      transient.kind = "transient";
+      throw transient;
+    }
+    if (isFetchCommunicationError(error)) error.kind = "transient";
     throw error;
   } finally {
     if (timer) clearTimeout(timer);
     if (idleTimer) clearTimeout(idleTimer);
   }
+}
+function isFetchCommunicationError(error) {
+  if (!(error instanceof TypeError)) return false;
+  const message = error.message.toLowerCase();
+  if (message.includes("terminated") || message.includes("fetch failed")) return true;
+  const seen = new Set();
+  for (let cause = error.cause; cause && !seen.has(cause); cause = cause.cause) {
+    seen.add(cause);
+    if (["ECONNRESET", "ETIMEDOUT", "UND_ERR_SOCKET"].includes(cause.code)) return true;
+  }
+  return false;
 }
 async function readEventStream(stream, onChunk) {
   let text = "";

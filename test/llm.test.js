@@ -123,7 +123,7 @@ test("openai chat aborts an SSE stream that stays idle after headers", async (t)
       { baseUrl: `http://127.0.0.1:${server.address().port}`, idleTimeoutMs: 50 },
       { model: "m", prompt: "p" },
     ),
-    /stream idle for 50ms/,
+    (error) => error.message === "stream idle for 50ms" && error.kind === "transient",
   );
 });
 test("openai chat keeps an SSE stream alive while chunks continue arriving", async (t) => {
@@ -166,13 +166,74 @@ test("openai chat rejects an SSE response that ends at DONE without content", as
       ),
       (error) => {
         assert.equal(error.message, "empty response");
-        assert.equal(error.kind, undefined);
+        assert.equal(error.kind, "transient");
         return true;
       },
     );
   } finally {
     globalThis.fetch = priorFetch;
   }
+});
+test("openai chat classifies temporary HTTP and response failures", async () => {
+  const { openaiChat } = await import("../src/llm/gateways/openai-chat.js");
+  const priorFetch = globalThis.fetch;
+  try {
+    for (const status of [500, 503, 408]) {
+      globalThis.fetch = async () => ({ ok: false, status, headers: { get: () => null }, text: async () => "" });
+      await assert.rejects(openaiChat({ baseUrl: "http://example.invalid" }, { model: "m", prompt: "p" }), (error) => error.kind === "transient");
+    }
+    globalThis.fetch = async () => ({ ok: false, status: 400, headers: { get: () => null }, text: async () => "bad" });
+    await assert.rejects(openaiChat({ baseUrl: "http://example.invalid" }, { model: "m", prompt: "p" }), (error) => error.kind === undefined);
+    globalThis.fetch = async () => ({ ok: false, status: 429, headers: { get: () => null }, text: async () => "" });
+    await assert.rejects(openaiChat({ baseUrl: "http://example.invalid" }, { model: "m", prompt: "p" }), (error) => error.kind === "limit");
+    globalThis.fetch = async () => { throw new TypeError("terminated"); };
+    await assert.rejects(openaiChat({ baseUrl: "http://example.invalid" }, { model: "m", prompt: "p" }), (error) => error.kind === "transient");
+  } finally { globalThis.fetch = priorFetch; }
+});
+test("transient route failure advances to the next entry and records the outcome", async (t) => {
+  const { routeLlm } = await import("../src/llm/router.js");
+  const temp = await tempRoot();
+  const prior = process.env.AIP_COOLDOWN_PATH;
+  process.env.AIP_COOLDOWN_PATH = path.join(temp, "cooldown.json");
+  const priorFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new TypeError("terminated"); };
+  t.after(() => { globalThis.fetch = priorFetch; });
+  t.after(async () => { if (prior === undefined) delete process.env.AIP_COOLDOWN_PATH; else process.env.AIP_COOLDOWN_PATH = prior; await rm(temp, { recursive: true, force: true }); });
+  const result = await routeLlm({ route: "r", prompt: "p", routes: { r: [{ gateway: "broken", model: "m" }, { gateway: "ok", model: "m" }] }, gateways: {
+    broken: { kind: "openai-chat", baseUrl: "http://unused", apiKeyEnv: "", },
+    ok: { kind: "exec", argv: [process.execPath, "-e", "console.log('ok')"] },
+  } });
+  assert.equal(result.text.trim(), "ok");
+  assert.deepEqual(result.tried.map(({ gateway, result: outcome }) => [gateway, outcome]), [["broken", "transient"], ["ok", "success"]]);
+});
+test("all transient route failures throw with every entry recorded", async (t) => {
+  const { routeLlm } = await import("../src/llm/router.js");
+  const temp = await tempRoot();
+  const prior = process.env.AIP_COOLDOWN_PATH;
+  process.env.AIP_COOLDOWN_PATH = path.join(temp, "cooldown.json");
+  const priorFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new TypeError("terminated"); };
+  t.after(() => { globalThis.fetch = priorFetch; });
+  t.after(async () => { if (prior === undefined) delete process.env.AIP_COOLDOWN_PATH; else process.env.AIP_COOLDOWN_PATH = prior; await rm(temp, { recursive: true, force: true }); });
+  await assert.rejects(routeLlm({ route: "r", prompt: "p", routes: { r: [{ gateway: "one", model: "m" }, { gateway: "two", model: "m" }] }, gateways: Object.fromEntries(["one", "two"].map((gateway) => [gateway, { kind: "openai-chat", baseUrl: "http://unused", apiKeyEnv: "" }])) }), (error) => {
+    assert.equal(error.kind, "transient");
+    assert.deepEqual(error.tried.map(({ gateway, result }) => [gateway, result]), [["one", "transient"], ["two", "transient"]]);
+    return true;
+  });
+});
+test("route errors without a kind still fail immediately", async (t) => {
+  const { routeLlm } = await import("../src/llm/router.js");
+  const temp = await tempRoot();
+  const prior = process.env.AIP_COOLDOWN_PATH;
+  process.env.AIP_COOLDOWN_PATH = path.join(temp, "cooldown.json");
+  const priorFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, status: 200, headers: { get: () => "application/json" }, json: async () => { throw new SyntaxError("invalid JSON"); } });
+  t.after(() => { globalThis.fetch = priorFetch; });
+  t.after(async () => { if (prior === undefined) delete process.env.AIP_COOLDOWN_PATH; else process.env.AIP_COOLDOWN_PATH = prior; await rm(temp, { recursive: true, force: true }); });
+  await assert.rejects(routeLlm({ route: "r", prompt: "p", routes: { r: [{ gateway: "bad", model: "m" }, { gateway: "ok", model: "m" }] }, gateways: {
+    bad: { kind: "openai-chat", baseUrl: "http://unused", apiKeyEnv: "" },
+    ok: { kind: "exec", argv: [process.execPath, "-e", "console.log('unexpected')"] },
+  } }), (error) => { assert.equal(error.kind, undefined); assert.deepEqual(error.tried.map((item) => item.result), ["failed"]); return true; });
 });
 test("openai chat continues to read JSON responses", async () => {
   const { openaiChat } = await import("../src/llm/gateways/openai-chat.js");

@@ -30,14 +30,22 @@ export async function routeLlm({ route, prompt, routes, gateways, fallbacks = {}
   }
   entries = reordered;
   const tried = [];
+  const transientEntries = new Set();
+  let lastTransientError;
   for (;;) {
     const cooldowns = await loadCooldowns();
     const available = entries.filter((entry) =>
-      (cooldowns[entry.gateway] ?? 0) <= Date.now()
+      (cooldowns[entry.gateway] ?? 0) <= Date.now() &&
+      !transientEntries.has(entryKey(entry))
     );
     if (!available.length) {
+      const cooling = entries.filter((entry) => (cooldowns[entry.gateway] ?? 0) > Date.now());
+      if (!cooling.length && lastTransientError) {
+        lastTransientError.tried = tried;
+        throw lastTransientError;
+      }
       const next = Math.min(
-        ...entries.map((entry) => cooldowns[entry.gateway] ?? 0),
+        ...cooling.map((entry) => cooldowns[entry.gateway]),
       );
       const waitMs = Math.max(0, next - Date.now());
       log("WARN", "route_wait", {
@@ -83,6 +91,23 @@ export async function routeLlm({ route, prompt, routes, gateways, fallbacks = {}
           tried,
         };
       } catch (error) {
+        if (error.kind === "transient") {
+          transientEntries.add(entryKey(entry));
+          lastTransientError = error;
+          tried.push({
+            gateway: entry.gateway,
+            model: entry.model,
+            effort: entry.effort,
+            result: "transient",
+            error: error.message,
+          });
+          log("WARN", "gateway_transient", {
+            gateway: entry.gateway,
+            model: entry.model,
+            error: error.message,
+          });
+          continue;
+        }
         if (error.kind !== "limit") {
           tried.push({
             gateway: entry.gateway,
@@ -113,6 +138,10 @@ export async function routeLlm({ route, prompt, routes, gateways, fallbacks = {}
       }
     }
   }
+}
+
+function entryKey(entry) {
+  return JSON.stringify([entry.gateway, entry.model, entry.effort]);
 }
 
 export function isPeak(peakHours, dateOrMillis) {
