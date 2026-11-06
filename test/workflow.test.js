@@ -308,6 +308,34 @@ test("failed exec stores stderr tail and stderr.log path in run state", async (t
   assert.match(state.error, /stderr\/steps\/fail\/v1\/a1\/stderr\.log/);
   assert.equal(await readFile(path.join(runs, "stderr/steps/fail/v1/a1/stderr.log"), "utf8"), "useful failure detail\n");
 });
+
+test("exec stderr is appended while the child is still running", async (t) => {
+  const temp = await setup(); t.after(() => rm(temp, { recursive: true, force: true }));
+  const stderrFile = path.join(temp, "stderr.log");
+  const { runExec } = await import("../src/steps/exec.js");
+  const running = runExec({ argv: [process.execPath, "-e", "process.stderr.write('x'.repeat(20000));setTimeout(()=>process.exit(0),200)"], cwd: temp, env: process.env, stderrFile });
+  let observed = false;
+  for (let i = 0; i < 100; i++) {
+    try { observed = (await readFile(stderrFile, "utf8")).length > 0; } catch {}
+    if (observed) break;
+    await new Promise(resolve => setTimeout(resolve, 2));
+  }
+  assert.equal(observed, true);
+  await running;
+  assert.equal((await readFile(stderrFile, "utf8")).length, 20000);
+});
+
+test("failed LLM usage includes tokens from unsuccessful route attempts", async (t) => {
+  const temp = await setup(); t.after(() => rm(temp, { recursive: true, force: true }));
+  await writeFile(path.join(temp, "role.md"), "role");
+  const definition = { id: "usage-fail", inputs: {}, steps: [textStep("ask", [], "answer", [])] };
+  const state = await initializeState(temp, definition, "workflow.json", {});
+  const gateway = async () => { const error = new Error("all gateways failed"); error.tried = [{ gateway: "first", result: "transient", usage: { inputTokens: 9, outputTokens: 0, totalTokens: 9 } }]; throw error; };
+  await schedule({ definition, definitionDir: temp, runDir: temp, state, gateway });
+  const usage = JSON.parse(await readFile(path.join(temp, "steps/ask/v1/a1/usage.json"), "utf8"));
+  assert.equal(usage.totalTokens, 9);
+  assert.equal(usage.inputTokens, 9);
+});
 test("definition rejects unresolved inputs and unknown goto", () => {
   assert.throws(
     () =>
@@ -419,10 +447,23 @@ test("human gateway waits for an output file and continues the same run", async 
   run(["continue", "--run-id", "human", ...opts(runs)]);
   s = JSON.parse(await readFile(path.join(runs, "human/state.json"), "utf8"));
   assert.equal(s.status, "completed");
+  assert.deepEqual(await readdir(path.join(runs, "human/steps/respond")), ["v1"]);
   assert.equal(
     await readFile(path.join(runs, "human/artifacts/response"), "utf8"),
     "Human response.",
   );
+});
+
+test("human resume reads the response from its current attempt version", async (t) => {
+  const temp = await setup(); t.after(() => rm(temp, { recursive: true, force: true }));
+  const runDir = path.join(temp, "run");
+  const current = path.join(runDir, "steps/respond/v2/a1");
+  await mkdir(path.join(runDir, "steps/respond/v1/a1"), { recursive: true });
+  await mkdir(current, { recursive: true });
+  await writeFile(path.join(runDir, "steps/respond/v1/a1/output.md"), "stale answer");
+  await writeFile(path.join(current, "output.md"), "current answer");
+  const { humanGateway } = await import("../src/llm/gateways/human.js");
+  assert.equal(await humanGateway({ step: { id: "respond" }, version: 2, dir: current, runDir, prompt: "prompt", resumeHuman: true }), "current answer");
 });
 test("ready commands run concurrently within the configured limit", async (t) => {
   const temp = await setup();
@@ -647,6 +688,77 @@ test("activation during execution schedules another version", async (t) => {
   assert.equal(state.steps.slow.attempts, 2);
 });
 
+test("activation during execution is saved before the running step completes", async (t) => {
+  const temp = await setup(); t.after(() => rm(temp, { recursive: true, force: true }));
+  await writeFile(path.join(temp, "role.md"), "role");
+  const definition = { id: "persist-reactivation", inputs: {}, steps: [
+    command("start", ["fast", "slow"]),
+    textStep("fast", [], "signal", ["slow"]),
+    textStep("slow", [], "result", []),
+  ] };
+  const runDir = path.join(temp, "run"); await mkdir(runDir, { recursive: true });
+  const state = await initializeState(runDir, definition, "workflow.json", {});
+  let releaseSlow; let slowStarted;
+  const started = new Promise(resolve => { slowStarted = resolve; });
+  let firstSlow = true;
+  const resultPromise = schedule({ definition, definitionDir: temp, runDir, state, gateway: async ({ step }) => {
+    if (step.id === "slow" && firstSlow) { firstSlow = false; slowStarted(); await new Promise(resolve => { releaseSlow = resolve; }); }
+    return "ok";
+  } });
+  await started;
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const saved = JSON.parse(await readFile(path.join(runDir, "state.json"), "utf8"));
+  const observed = saved.steps.slow.reactivated === true;
+  releaseSlow();
+  const result = await resultPromise;
+  assert.equal(result.status, "completed", result.error);
+  assert.equal(observed, true);
+  assert.equal(result.steps.slow.attempts, 2);
+});
+
+test("a saved pending decision resumes with one case count and commits its frontier", async (t) => {
+  const temp = await setup(); t.after(() => rm(temp, { recursive: true, force: true }));
+  const source = path.join(temp, "source.md"); await writeFile(source, "VERDICT: PASS");
+  const definition = { id: "resume-decision", inputs: { source }, steps: [
+    { id: "gate", kind: "decide", source: "source", cases: [{ when: ["PASS"], goto: "finish", max: 3 }] },
+    command("finish", []),
+  ] };
+  const state = await initializeState(temp, definition, "workflow.json", { source });
+  state.steps.gate.pendingSelection = { selected: "finish", index: 0 };
+  await saveState(temp, state);
+  const result = await schedule({ definition, definitionDir: temp, runDir: temp, state, gateway: async () => "" });
+  assert.equal(result.status, "completed", result.error);
+  assert.equal(result.rounds.gate[0], 1);
+  assert.equal(result.steps.gate.selected, "finish");
+  assert.equal(Object.hasOwn(result.steps.gate, "pendingSelection"), false);
+});
+
+test("exec arguments that resemble paths are passed through without file checks", async (t) => {
+  const temp = await setup();
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const wf = path.join(temp, "workflow.json");
+  await writeFile(wf, JSON.stringify({ id: "args", inputs: {}, steps: [{ id: "run", kind: "exec", argv: [process.execPath, "-e", "process.exit(process.argv[1] === './not-a-file' ? 0 : 1)", "./not-a-file"], outputs: [] }] }));
+  const { loadDefinition } = await import("../src/definition/load.js");
+  const loaded = await loadDefinition(wf);
+  assert.equal(loaded.definition.steps[0].argv.at(-1), "./not-a-file");
+});
+
+test("failed multi-output exec does not publish partial artifacts", async (t) => {
+  const temp = await setup();
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const wfDir = path.join(temp, "wf"); await mkdir(wfDir);
+  const wf = path.join(wfDir, "workflow.json");
+  await writeFile(wf, JSON.stringify({ id: "partial", inputs: {}, steps: [{ id: "write", kind: "exec", argv: [process.execPath, "-e", "const fs=require('node:fs');const m=JSON.parse(fs.readFileSync(process.env.AIP_MANIFEST));fs.writeFileSync(m.outputs.a,'new');fs.writeFileSync(m.outputs.b,'new')"], outputs: ["a", "b"] }] }));
+  const runs = path.join(temp, "runs"); await mkdir(path.join(runs, "run", "artifacts"), { recursive: true });
+  await writeFile(path.join(runs, "run", "artifacts", "a"), "old-a");
+  const { definition } = await import("../src/definition/load.js").then(async m => m.loadDefinition(wf));
+  const state = await initializeState(path.join(runs, "run"), definition, wf, {});
+  const broken = structuredClone(definition); broken.steps[0].argv[2] = "const fs=require('node:fs');const m=JSON.parse(fs.readFileSync(process.env.AIP_MANIFEST));fs.writeFileSync(m.outputs.a,'new')";
+  const result = await schedule({ definition: broken, definitionDir: wfDir, runDir: path.join(runs, "run"), state, gateway: async () => "" });
+  assert.equal(result.status, "failed");
+  assert.equal(await readFile(path.join(runs, "run", "artifacts", "a"), "utf8"), "old-a");
+});
+
 test("definition validates transition and join references", () => {
   for (const key of ["next", "waitFor"]) {
     for (const value of ["end", ["missing"], [42]]) {
@@ -689,7 +801,7 @@ test("runtime inputs resolve from the JSON file and survive continue and rerun",
   run(["rerun", "--run-id", "override", "--from", "read", ...opts(runs)]);
   state = await loadState(path.join(runs, "override"));
   assert.equal(state.status, "waiting-human");
-  assert.match(await readFile(path.join(runs, "override/steps/read/v3/a1/prompt.md"), "utf8"), /replacement content/);
+  assert.match(await readFile(path.join(runs, "override/steps/read/v2/a1/prompt.md"), "utf8"), /replacement content/);
 });
 
 test("runtime inputs reject unknown IDs, invalid mappings, and missing paths before creating a run", async (t) => {

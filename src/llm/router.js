@@ -1,8 +1,10 @@
 import os from "node:os";
 import path from "node:path";
+import { mkdir } from "node:fs/promises";
 import { openaiChat } from "./gateways/openai-chat.js";
 import { execGateway } from "./gateways/exec.js";
 import { atomicJson, exists, readJson } from "../io/files.js";
+import { acquireLease } from "../engine/lease.js";
 import { log } from "../io/log.js";
 
 const DEFAULT_COOLDOWN = 60 * 60 * 1000;
@@ -62,17 +64,30 @@ export async function routeLlm({ route, prompt, routes, gateways, fallbacks = {}
       const gateway = gateways[entry.gateway];
       if (!gateway) throw new Error(`unknown gateway: ${entry.gateway}`);
       try {
+        const invoke = async () => {
+          const latest = await loadCooldowns();
+          if ((latest[entry.gateway] ?? 0) > Date.now()) {
+            const skipped = new Error("gateway entered cooldown while waiting");
+            skipped.kind = "cooldown";
+            throw skipped;
+          }
+          return gateway.kind === "openai-chat"
+            ? openaiChat(gateway, { ...entry, prompt })
+            : gateway.kind === "exec"
+            ? execGateway(gateway, { ...entry, prompt, attemptDir })
+            : Promise.reject(new Error(`unsupported gateway kind: ${gateway.kind}`));
+        };
         const result = gateway.kind === "openai-chat"
           ? await withParallel(
             entry.gateway,
             gateway.maxParallel,
-            () => openaiChat(gateway, { ...entry, prompt }),
+            invoke,
           )
           : gateway.kind === "exec"
           ? await withParallel(
             entry.gateway,
             gateway.maxParallel,
-            () => execGateway(gateway, { ...entry, prompt, attemptDir }),
+            invoke,
           )
           : (() => {
             throw new Error(`unsupported gateway kind: ${gateway.kind}`);
@@ -82,6 +97,7 @@ export async function routeLlm({ route, prompt, routes, gateways, fallbacks = {}
           model: entry.model,
           effort: entry.effort,
           result: "success",
+          ...(result.usage ? { usage: result.usage } : {}),
         });
         return {
           ...result,
@@ -91,6 +107,7 @@ export async function routeLlm({ route, prompt, routes, gateways, fallbacks = {}
           tried,
         };
       } catch (error) {
+        if (error.kind === "cooldown") continue;
         if (error.kind === "transient") {
           transientEntries.add(entryKey(entry));
           lastTransientError = error;
@@ -100,6 +117,7 @@ export async function routeLlm({ route, prompt, routes, gateways, fallbacks = {}
             effort: entry.effort,
             result: "transient",
             error: error.message,
+            ...(error.usage ? { usage: error.usage } : {}),
           });
           log("WARN", "gateway_transient", {
             gateway: entry.gateway,
@@ -115,6 +133,7 @@ export async function routeLlm({ route, prompt, routes, gateways, fallbacks = {}
             effort: entry.effort,
             result: "failed",
             error: error.message,
+            ...(error.usage ? { usage: error.usage } : {}),
           });
           error.tried = tried;
           throw error;
@@ -122,7 +141,17 @@ export async function routeLlm({ route, prompt, routes, gateways, fallbacks = {}
         const duration = error.retryAfterMs ?? gateway.cooldownMs ??
           DEFAULT_COOLDOWN;
         cooldowns[entry.gateway] = Date.now() + duration;
-        await atomicJson(cooldownPath(), cooldowns);
+        const file = cooldownPath();
+        await mkdir(path.dirname(file), { recursive: true });
+        const release = await acquireCooldownLease(`${file}.lease`);
+        try {
+          const latest = await loadCooldowns();
+          latest[entry.gateway] = Math.max(latest[entry.gateway] ?? 0, cooldowns[entry.gateway]);
+          Object.assign(cooldowns, latest);
+          await atomicJson(file, latest);
+        } finally {
+          await release();
+        }
         log("WARN", "gateway_limited", {
           gateway: entry.gateway,
           model: entry.model,
@@ -134,6 +163,7 @@ export async function routeLlm({ route, prompt, routes, gateways, fallbacks = {}
           effort: entry.effort,
           result: "limit",
           retryAfterMs: error.retryAfterMs,
+          ...(error.usage ? { usage: error.usage } : {}),
         });
       }
     }
@@ -198,6 +228,16 @@ export function expandRouteEntries(entries, fallbacks) {
 async function loadCooldowns() {
   const file = cooldownPath();
   return await exists(file) ? readJson(file) : {};
+}
+async function acquireCooldownLease(file) {
+  for (;;) {
+    try {
+      return await acquireLease(file);
+    } catch (error) {
+      if (!error.message.startsWith("run is leased:")) throw error;
+      await delay(10);
+    }
+  }
 }
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));

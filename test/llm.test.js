@@ -110,6 +110,90 @@ test("openai chat assembles split SSE content and usage, stopping at DONE", asyn
     globalThis.fetch = priorFetch;
   }
 });
+
+test("empty OpenAI response errors retain streamed usage", async () => {
+  const { openaiChat } = await import("../src/llm/gateways/openai-chat.js");
+  const priorFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, status: 200,
+    headers: { get: () => "text/event-stream" },
+    body: (async function* () {
+      yield new TextEncoder().encode('data: {"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":0,"total_tokens":8}}\n');
+      yield new TextEncoder().encode("data: [DONE]\n");
+    })() });
+  try {
+    await assert.rejects(openaiChat({ baseUrl: "http://example.invalid" }, { model: "m", prompt: "p" }), error => {
+      assert.deepEqual(error.usage, { inputTokens: 8, outputTokens: 0, totalTokens: 8 });
+      return true;
+    });
+  } finally { globalThis.fetch = priorFetch; }
+});
+
+test("route records usage for failed gateway attempts", async (t) => {
+  const { routeLlm } = await import("../src/llm/router.js");
+  const temp = await tempRoot();
+  const prior = process.env.AIP_COOLDOWN_PATH;
+  process.env.AIP_COOLDOWN_PATH = path.join(temp, "cooldown.json");
+  t.after(async () => { if (prior === undefined) delete process.env.AIP_COOLDOWN_PATH; else process.env.AIP_COOLDOWN_PATH = prior; await rm(temp, { recursive: true, force: true }); });
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => (++calls === 1
+    ? ({ ok: true, status: 200, headers: { get: () => "application/json" }, json: async () => ({ choices: [], usage: { prompt_tokens: 4, completion_tokens: 0, total_tokens: 4 } }) })
+    : ({ ok: true, status: 200, headers: { get: () => "application/json" }, json: async () => ({ choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 } }) }));
+  try {
+    const result = await routeLlm({ route: "r", prompt: "p", routes: { r: [{ gateway: "a", model: "m" }, { gateway: "b", model: "m" }] }, gateways: { a: { kind: "openai-chat", baseUrl: "http://a" }, b: { kind: "openai-chat", baseUrl: "http://b" } } });
+    assert.deepEqual(result.tried[0].usage, { inputTokens: 4, outputTokens: 0, totalTokens: 4 });
+  } finally { globalThis.fetch = original; }
+});
+
+test("concurrent cooldown updates merge under a lease and remove it afterward", async (t) => {
+  const { routeLlm } = await import("../src/llm/router.js");
+  const temp = await tempRoot(); const cooldown = path.join(temp, "cooldown.json");
+  const priorPath = process.env.AIP_COOLDOWN_PATH; process.env.AIP_COOLDOWN_PATH = cooldown;
+  const priorFetch = globalThis.fetch;
+  t.after(async () => { globalThis.fetch = priorFetch; if (priorPath === undefined) delete process.env.AIP_COOLDOWN_PATH; else process.env.AIP_COOLDOWN_PATH = priorPath; await rm(temp, { recursive: true, force: true }); });
+  globalThis.fetch = async url => {
+    const name = new URL(url).hostname;
+    return name === "limited-a" || name === "limited-b"
+      ? { ok: false, status: 429, headers: { get: () => "1" }, text: async () => "" }
+      : { ok: true, status: 200, headers: { get: () => "application/json" }, json: async () => ({ choices: [{ message: { content: "ok" } }], usage: {} }) };
+  };
+  const entry = (gateway) => ({ gateway, model: "m" });
+  const gateways = Object.fromEntries(["limited-a", "limited-b", "ok-a", "ok-b"].map(name => [name, { kind: "openai-chat", baseUrl: `http://${name}` }]));
+  await Promise.all([
+    routeLlm({ route: "a", prompt: "p", routes: { a: [entry("limited-a"), entry("ok-a")] }, gateways }),
+    routeLlm({ route: "b", prompt: "p", routes: { b: [entry("limited-b"), entry("ok-b")] }, gateways }),
+  ]);
+  const saved = JSON.parse(await readFile(cooldown, "utf8"));
+  assert.ok(saved["limited-a"] > Date.now());
+  assert.ok(saved["limited-b"] > Date.now());
+  await assert.rejects(readFile(`${cooldown}.lease`), { code: "ENOENT" });
+});
+
+test("gateway cooldown is rechecked after waiting for a parallel slot", async (t) => {
+  const { routeLlm } = await import("../src/llm/router.js");
+  const temp = await tempRoot(); const cooldown = path.join(temp, "cooldown.json");
+  const priorPath = process.env.AIP_COOLDOWN_PATH; process.env.AIP_COOLDOWN_PATH = cooldown;
+  const priorFetch = globalThis.fetch;
+  t.after(async () => { globalThis.fetch = priorFetch; if (priorPath === undefined) delete process.env.AIP_COOLDOWN_PATH; else process.env.AIP_COOLDOWN_PATH = priorPath; await rm(temp, { recursive: true, force: true }); });
+  let requests = 0; let releaseFirst; let markStarted;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  globalThis.fetch = async () => {
+    requests++;
+    if (requests === 1) { markStarted(); await new Promise(resolve => { releaseFirst = resolve; }); }
+    return { ok: true, status: 200, headers: { get: () => "application/json" }, json: async () => ({ choices: [{ message: { content: "ok" } }], usage: {} }) };
+  };
+  const gateways = { shared: { kind: "openai-chat", baseUrl: "http://shared", maxParallel: 1 } };
+  const options = { route: "r", prompt: "p", routes: { r: [{ gateway: "shared", model: "m" }] }, gateways };
+  const first = routeLlm(options);
+  await started;
+  const second = routeLlm(options);
+  const cooldownUntil = Date.now() + 120;
+  await writeFile(cooldown, JSON.stringify({ shared: cooldownUntil }));
+  releaseFirst();
+  await Promise.all([first, second]);
+  assert.equal(requests, 2);
+  assert.ok(Date.now() >= cooldownUntil);
+});
 test("openai chat aborts an SSE stream that stays idle after headers", async (t) => {
   const { openaiChat } = await import("../src/llm/gateways/openai-chat.js");
   const server = http.createServer((_request, response) => {

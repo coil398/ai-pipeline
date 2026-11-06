@@ -64,15 +64,21 @@ export async function schedule(
       if (selectedCase?.max !== undefined) {
         const index = decision.cases.indexOf(selectedCase);
         const counts = state.rounds[decision.id] ??= {};
-        if ((counts[index] ?? 0) >= selectedCase.max) {
+        if (!state.steps[decision.id].pendingSelection && (counts[index] ?? 0) >= selectedCase.max) {
           log("INFO", "case_limit", { run_id: state.runId, step_id: decision.id, case_index: index, count: counts[index], max: selectedCase.max });
           state.status = "stopped: max-rounds";
           break;
         }
-        counts[index] = (counts[index] ?? 0) + 1;
+      }
+      if (decision && !state.steps[decision.id].pendingSelection) {
+        const index = selectedCase ? decision.cases.indexOf(selectedCase) : undefined;
+        state.steps[decision.id].pendingSelection = {
+          selected: selectedCase?.goto ?? decision.default,
+          ...(selectedCase?.max !== undefined ? { index } : {}),
+        };
+        await saveState(runDir, state);
       }
       const active = new Set(batch.map((step) => step.id));
-      const reactivated = new Set();
       const outcomes = await Promise.allSettled(batch.map(async (step) => {
         const record = state.steps[step.id];
         record.startedSequence = ++state.sequence;
@@ -84,16 +90,25 @@ export async function schedule(
           record.completedAt = new Date().toISOString();
           record.completedSequence = ++state.sequence;
           active.delete(step.id);
-          if (!reactivated.has(step.id)) {
+          const reactivated = Boolean(record.reactivated);
+          delete record.reactivated;
+          if (!reactivated) {
             state.frontier = state.frontier.filter((id) => id !== step.id);
+          } else if (!state.frontier.includes(step.id)) {
+            state.frontier.push(step.id);
           }
           const index = definition.steps.indexOf(step);
           const next = step.kind === "decide" ? [record.selected]
             : step.next ?? (definition.steps[index + 1] ? [definition.steps[index + 1].id] : []);
           for (const id of next) {
-            if (active.has(id)) reactivated.add(id);
+            if (active.has(id)) state.steps[id].reactivated = true;
             if (!state.frontier.includes(id)) state.frontier.push(id);
           }
+          if (step.kind === "decide" && record.pendingSelection?.index !== undefined) {
+            const counts = state.rounds[step.id] ??= {};
+            counts[record.pendingSelection.index] = (counts[record.pendingSelection.index] ?? 0) + 1;
+          }
+          if (step.kind === "decide") delete record.pendingSelection;
           log("INFO", "step_done", { run_id: state.runId, step_id: step.id, next: next.join(","), elapsed_ms: Date.now() - started });
           await saveState(runDir, state);
         } catch (error) {
@@ -137,7 +152,8 @@ async function execute(
   { step, definition, definitionDir, runDir, state, gateway, selectedCase, parallel = 4 },
 ) {
   const record = state.steps[step.id];
-  const version = step.kind === "map" && ["failed", "running"].includes(record.status) && record.attempts ? record.attempts : ++record.attempts;
+  const version = record.status === "waiting-human" ? record.attempts
+    : step.kind === "map" && ["failed", "running"].includes(record.status) && record.attempts ? record.attempts : ++record.attempts;
   if (step.kind === "map") {
     record.status = "running";
     await saveState(runDir, state);
@@ -172,7 +188,7 @@ async function execute(
     gateway,
   });
   if (step.kind === "decide") {
-    const selected = selectedCase?.goto ?? step.default;
+    const selected = record.pendingSelection?.selected ?? selectedCase?.goto ?? step.default;
     if (!selected) throw new Error(`no matching case in ${step.id} and no default`);
     record.selected = selected;
   }
@@ -205,6 +221,12 @@ async function executeWork({
         context: { version, runDir, dir },
       });
     } catch (error) {
+      const tried = error.tried ?? [];
+      const usage = tried.reduce((sum, item) => ({
+        inputTokens: sum.inputTokens + (item.usage?.inputTokens ?? 0),
+        outputTokens: sum.outputTokens + (item.usage?.outputTokens ?? 0),
+        totalTokens: sum.totalTokens + (item.usage?.totalTokens ?? 0),
+      }), { inputTokens: 0, outputTokens: 0, totalTokens: 0 });
       await atomicJson(path.join(dir, "usage.json"), {
         gateway: null,
         model: null,
@@ -212,20 +234,25 @@ async function executeWork({
         inputTokens: 0,
         outputTokens: 0,
         totalTokens: 0,
-        tried: error.tried ?? [],
+        ...usage,
+        tried,
       });
       throw error;
     }
     const output = typeof result === "string" ? result : result.text;
     await writeFile(path.join(dir, "output.md"), output);
+    const tried = result.tried ?? [{ gateway: "human", result: "success" }];
+    const usage = tried.reduce((sum, item) => ({
+      inputTokens: sum.inputTokens + (item.usage?.inputTokens ?? 0),
+      outputTokens: sum.outputTokens + (item.usage?.outputTokens ?? 0),
+      totalTokens: sum.totalTokens + (item.usage?.totalTokens ?? 0),
+    }), { inputTokens: 0, outputTokens: 0, totalTokens: 0 });
     await atomicJson(path.join(dir, "usage.json"), {
       gateway: result.gateway ?? "human",
       model: result.model ?? null,
       effort: result.effort ?? null,
-      inputTokens: result.usage?.inputTokens ?? 0,
-      outputTokens: result.usage?.outputTokens ?? 0,
-      totalTokens: result.usage?.totalTokens ?? 0,
-      tried: result.tried ?? [{ gateway: "human", result: "success" }],
+      ...usage,
+      tried,
     });
     const current = outputPath(step.output);
     await ensureDir(path.dirname(current));
@@ -267,10 +294,8 @@ async function executeWork({
       stderrFile: path.join(dir, "stderr.log"),
       env: { ...process.env, AIP_MANIFEST: manifestFile },
     });
+    for (const id of step.outputs) if (!await exists(manifest.outputs[id])) throw new Error(`exec output missing: ${id}`);
     for (const id of step.outputs) {
-      if (!await exists(manifest.outputs[id])) {
-        throw new Error(`exec output missing: ${id}`);
-      }
       const current = outputPath(id);
       await ensureDir(path.dirname(current));
       await copyFile(manifest.outputs[id], current);

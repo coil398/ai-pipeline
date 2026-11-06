@@ -34,17 +34,8 @@ export async function loadDefinition(file, inputOverrides = {}, options = {}) {
       step.role &&
       !await exists(path.resolve(path.dirname(absolute), step.role))
     ) throw new Error(`missing role file for ${step.id}: ${step.role}`);
-    for (const ref of step.argv ?? []) {
-      if (
-        typeof ref === "string" && (ref.includes("/") || ref.startsWith(".")) &&
-        !await exists(path.resolve(path.dirname(absolute), ref))
-      ) {
-        throw new Error(`missing file for ${step.id}: ${ref}`);
-      }
-    }
     for (const inner of step.steps ?? []) {
       if (inner.role && !await exists(path.resolve(path.dirname(absolute), inner.role))) throw new Error(`missing role file for ${inner.id}: ${inner.role}`);
-      for (const ref of inner.argv ?? []) if (typeof ref === "string" && (ref.includes("/") || ref.startsWith(".")) && !await exists(path.resolve(path.dirname(absolute), ref))) throw new Error(`missing file for ${inner.id}: ${ref}`);
     }
   }
   return {

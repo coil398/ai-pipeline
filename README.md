@@ -44,6 +44,8 @@ aip render --run-id <id> [--runs-dir <dir>]
 - `exec` gateway configurations accept `timeoutMs`; timed out processes receive SIGTERM and then SIGKILL after 10 seconds. Without `timeoutMs`, they have no time limit.
 - `openai-chat` gateway configurations accept `idleTimeoutMs` (default `300000` ms); it aborts a request if response headers or the next stream chunk do not arrive in time. Set it to `0` to disable the idle timeout.
 - `continue` resumes the saved frontier. `rerun --from <step>` makes only the named step pending and clears decision case counts while retaining artifacts and prior step versions.
+- `continue` consumes a human response from the waiting step version. Values in `exec.argv` are passed through as process arguments; only declared inputs, roles, and component entry points are checked as files.
+- LLM cooldown updates merge under a `.lease` file, and gateways are checked again before a request is sent. LLM usage records include usage returned by failed calls.
 - `status` prints the state JSON. `render` prints a compact status view.
 
 The CLI reports a nonzero exit code for failed runs, a `max-rounds` stop, and a missing fixture response. A run waiting for input or a human response is represented in its saved state.

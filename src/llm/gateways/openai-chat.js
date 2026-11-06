@@ -83,19 +83,21 @@ export async function openaiChat(gateway, request) {
       ? await readEventStream(response.body, resetIdleTimer)
       : await response.json();
     const text = body.text ?? body.choices?.[0]?.message?.content ?? "";
+    const usage = body.usage ?? {};
+    const normalizedUsage = {
+      inputTokens: usage.prompt_tokens ?? 0,
+      outputTokens: usage.completion_tokens ?? 0,
+      totalTokens: usage.total_tokens ?? 0,
+    };
     if (!text.trim()) {
       const error = new Error("empty response");
       error.kind = "transient";
+      error.usage = normalizedUsage;
       throw error;
     }
-    const usage = body.usage ?? {};
     return {
       text,
-      usage: {
-        inputTokens: usage.prompt_tokens ?? 0,
-        outputTokens: usage.completion_tokens ?? 0,
-        totalTokens: usage.total_tokens ?? 0,
-      },
+      usage: normalizedUsage,
     };
   } catch (error) {
     if (idleTimedOut) {
