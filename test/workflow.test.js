@@ -691,7 +691,7 @@ test("rerun from fanout waits for every fresh branch completion before retrying 
   await writeFile(path.join(dir, "role.md"), "Respond.");
   const wf = path.join(dir, "workflow.json");
   const definition = { id: "fanout-join-rerun", inputs: {}, steps: [
-    command("A", ["B", "C"]), command("B", []), command("C", ["join"]),
+    command("A", ["B", "C", "join"]), command("B", ["join"]), command("C", ["join"]),
     { ...textStep("join", [], "joined", []), waitFor: ["B", "C"] },
   ] };
   await writeFile(wf, JSON.stringify(definition));
@@ -711,6 +711,8 @@ test("rerun from fanout waits for every fresh branch completion before retrying 
   assert.equal(state.steps.B.attempts, 2);
   assert.equal(state.steps.C.attempts, 2);
   assert.equal(state.steps.join.attempts, 2);
+  assert.ok(state.steps.join.startedSequence > state.steps.B.completedSequence);
+  assert.ok(state.steps.join.startedSequence > state.steps.C.completedSequence);
 });
 
 test("failed join retry keeps the wait baseline from its launch", async (t) => {
