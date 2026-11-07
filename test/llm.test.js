@@ -858,6 +858,34 @@ test("exec gateway only matches case-insensitive limit patterns on failure", asy
     await rm(temp, { recursive: true, force: true });
   }
 });
+test("exec gateway classifies a limit when the CLI exits before reading stdin", async () => {
+  const { routeLlm } = await import("../src/llm/router.js");
+  const temp = await tempRoot();
+  const prior = process.env.AIP_COOLDOWN_PATH;
+  process.env.AIP_COOLDOWN_PATH = path.join(temp, "cooldown.json");
+  try {
+    const result = await routeLlm({
+      route: "r",
+      prompt: "x".repeat(2_000_000),
+      routes: { r: [{ gateway: "limited", model: "m" }, { gateway: "ok", model: "m" }] },
+      gateways: {
+        limited: {
+          kind: "exec",
+          argv: [process.execPath, "-e", "console.log('quota exceeded');process.exit(1)"],
+          limitPatterns: ["quota exceeded"],
+        },
+        ok: { kind: "exec", argv: [process.execPath, "-e", "process.stdin.resume();console.log('fallback')"] },
+      },
+      attemptDir: path.join(temp, "attempt"),
+    });
+    assert.equal(result.text.trim(), "fallback");
+    assert.deepEqual(result.tried.map(({ result: outcome }) => outcome), ["limit", "success"]);
+  } finally {
+    if (prior === undefined) delete process.env.AIP_COOLDOWN_PATH;
+    else process.env.AIP_COOLDOWN_PATH = prior;
+    await rm(temp, { recursive: true, force: true });
+  }
+});
 test("exec gateway terminates timed out child processes", async () => {
   const { execGateway } = await import("../src/llm/gateways/exec.js");
   const temp = await tempRoot();

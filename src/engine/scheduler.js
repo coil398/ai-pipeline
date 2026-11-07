@@ -52,6 +52,7 @@ export async function schedule(
       }
       if (!batch.length) {
         state.frontier = state.frontier.filter((id) => {
+          if (id === state.rerunFrom) return true;
           const step = definition.steps.find((item) => item.id === id);
           return !(step?.waitFor?.length && step.waitFor.every((source) =>
             !state.frontier.includes(source)
@@ -93,6 +94,7 @@ export async function schedule(
           record.completedAt = new Date().toISOString();
           record.completedSequence = ++state.sequence;
           delete record.waitBaseline;
+          if (state.rerunFrom === step.id) delete state.rerunFrom;
           active.delete(step.id);
           const reactivated = Boolean(record.reactivated);
           delete record.reactivated;
@@ -157,7 +159,7 @@ async function execute(
 ) {
   const record = state.steps[step.id];
   const version = record.status === "waiting-human" ? record.attempts
-    : step.kind === "map" && ["failed", "running"].includes(record.status) && record.attempts ? record.attempts : ++record.attempts;
+    : step.kind === "map" && !state.rerunRequested && ["failed", "running"].includes(record.status) && record.attempts ? record.attempts : ++record.attempts;
   if (step.kind === "map") {
     record.status = "running";
     await saveState(runDir, state);
@@ -331,7 +333,7 @@ async function executeMap({ step, version, definition, definitionDir, runDir, st
         ...(last.kind === "llm" ? [] : [last.outputs.at(-1)]),
       );
       const started = Date.now();
-      if (await exists(completedItemRoot)) {
+      if (!state.rerunRequested && await exists(completedItemRoot)) {
         results[index] = await readText(lastOutput(completedItemRoot));
         continue;
       }

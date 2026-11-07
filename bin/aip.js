@@ -102,6 +102,8 @@ async function main() {
     return withLease(runDir, async () => {
       const state = await loadState(runDir, loaded.definition);
       state.frontier = [start];
+      state.rerunFrom = start;
+      state.rerunRequested = true;
       for (const step of loaded.definition.steps) {
         const record = state.steps[step.id];
         delete record.pendingSelection;
@@ -135,10 +137,10 @@ async function runLoaded(loaded, runDir, state, parallel) {
   await saveState(runDir, state);
   const definitionDir = path.dirname(loaded.file);
   const routesFile = path.resolve(
-    option("--routes", path.join(definitionDir, "routes.json")),
+    option("--routes", state.llmConfig?.routesFile ?? path.join(definitionDir, "routes.json")),
   );
   const gatewaysFile = path.resolve(
-    option("--gateways", path.join(definitionDir, "gateways.json")),
+    option("--gateways", state.llmConfig?.gatewaysFile ?? path.join(definitionDir, "gateways.json")),
   );
   const routes = await exists(routesFile)
     ? JSON.parse(await readText(routesFile))
@@ -148,8 +150,9 @@ async function runLoaded(loaded, runDir, state, parallel) {
     : {};
   validatePeakHours(gateways);
   const fallbacksFile = path.resolve(
-    option("--fallbacks", path.join(definitionDir, "fallbacks.json")),
+    option("--fallbacks", state.llmConfig?.fallbacksFile ?? path.join(definitionDir, "fallbacks.json")),
   );
+  state.llmConfig = { routesFile, gatewaysFile, fallbacksFile };
   const fallbacks = await exists(fallbacksFile)
     ? JSON.parse(await readText(fallbacksFile))
     : {};
@@ -238,6 +241,10 @@ async function runLoaded(loaded, runDir, state, parallel) {
     gateway,
     parallel,
   });
+  if (state.rerunRequested) {
+    delete state.rerunRequested;
+    await saveState(runDir, state);
+  }
   log(result.status === "failed" ? "ERROR" : "INFO", "run_done", {
     run_id: state.runId,
     status: result.status,

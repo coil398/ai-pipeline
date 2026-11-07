@@ -26,6 +26,7 @@ export async function execGateway(gateway, request) {
       });
       let stdout = "";
       let stderr = "";
+      let stdinError;
       let timedOut = false;
       let killTimer;
       const timeoutTimer = gateway.timeoutMs === undefined
@@ -44,6 +45,11 @@ export async function execGateway(gateway, request) {
       });
       child.stderr.setEncoding("utf8").on("data", (chunk) => {
         stderr += chunk;
+      });
+      child.stdin.on("error", (error) => {
+        // A child that exits before consuming stdin closes the pipe. Its exit
+        // status and output still determine whether this is a gateway limit.
+        if (error.code !== "EPIPE") stdinError = error;
       });
       child.on("error", (error) => {
         clearTimers();
@@ -73,6 +79,7 @@ export async function execGateway(gateway, request) {
         if (code !== 0) {
           return reject(new Error(`exec gateway exited ${code}: ${stderr}`));
         }
+        if (stdinError) return reject(stdinError);
         let text = stdout;
         if (gateway.outputFile) {
           try {

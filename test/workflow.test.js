@@ -26,6 +26,30 @@ function run(args, expected = 0) {
   return r.stdout;
 }
 const opts = (runs) => ["--runs-dir", runs];
+test("continue and rerun default to saved resolved LLM configuration paths", async (t) => {
+  const temp = await setup();
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const dir = path.join(temp, "wf");
+  const config = path.join(temp, "config");
+  await mkdir(dir);
+  await mkdir(config);
+  await writeFile(path.join(dir, "role.md"), "Respond.");
+  const workflow = path.join(dir, "workflow.json");
+  await writeFile(workflow, JSON.stringify({ id: "saved-config", inputs: {}, steps: [textStep("write", [], "result", [])] }));
+  const routes = path.join(config, "custom-routes.json");
+  const gateways = path.join(config, "custom-gateways.json");
+  const fallbacks = path.join(config, "custom-fallbacks.json");
+  await writeFile(routes, JSON.stringify({ local: [{ gateway: "cli", model: "m" }] }));
+  await writeFile(gateways, JSON.stringify({ cli: { kind: "exec", argv: [process.execPath, "-e", "process.stdin.resume();console.log('saved route')"] } }));
+  await writeFile(fallbacks, "{}");
+  const runs = path.join(temp, "runs");
+  run(["run", workflow, "--run-id", "saved", ...opts(runs), "--routes", routes, "--gateways", gateways, "--fallbacks", fallbacks]);
+  run(["rerun", "--run-id", "saved", "--from", "write", ...opts(runs)]);
+  const state = JSON.parse(await readFile(path.join(runs, "saved/state.json"), "utf8"));
+  assert.equal(state.status, "completed", state.error);
+  assert.deepEqual(state.llmConfig, { routesFile: routes, gatewaysFile: gateways, fallbacksFile: fallbacks });
+  assert.equal(await readFile(path.join(runs, "saved/steps/write/v2/a1/output.md"), "utf8"), "saved route\n");
+});
 test("review loop passes FAIL to revise and completes on PASS", async (t) => {
   const temp = await setup();
   t.after(() => rm(temp, { recursive: true, force: true }));
@@ -219,6 +243,18 @@ test("completed map reached again uses a new version and reruns all items", asyn
   const result = await runMap(t, ["x", "y"]);
   assert.equal(result.state.status, "completed", result.state.error);
   result.state.frontier = ["map"];
+  const before = result.calls.length;
+  await schedule({ definition: result.definition, definitionDir: result.temp, runDir: result.temp, state: result.state, gateway: result.gateway });
+  assert.equal(result.state.status, "completed", result.state.error);
+  assert.equal(result.state.steps.map.attempts, 2);
+  assert.equal(result.calls.length - before, 2);
+  assert.ok(await readFile(path.join(result.temp, "steps/map/v2/items/0/render/a1/output.md"), "utf8"));
+});
+test("rerun map uses a new version while continue reuses successful items", async (t) => {
+  const result = await runMap(t, ["x", "y"]);
+  assert.equal(result.state.status, "completed", result.state.error);
+  result.state.frontier = ["map"];
+  result.state.rerunRequested = true;
   const before = result.calls.length;
   await schedule({ definition: result.definition, definitionDir: result.temp, runDir: result.temp, state: result.state, gateway: result.gateway });
   assert.equal(result.state.status, "completed", result.state.error);
@@ -681,6 +717,33 @@ test("failed join continues after upstream completion and rerun --from join runs
   assert.equal(state.status, "completed", state.error);
   assert.equal(state.steps.join.attempts, 2);
   assert.equal(state.steps.after.attempts, 1);
+});
+
+test("rerun from a completed join keeps it waiting for fresh upstream completions", async (t) => {
+  const temp = await setup();
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const dir = path.join(temp, "wf");
+  await mkdir(dir);
+  await writeFile(path.join(dir, "role.md"), "Respond.");
+  const workflow = path.join(dir, "workflow.json");
+  const definition = { id: "completed-join", inputs: {}, steps: [
+    command("start", ["a", "b"]), command("a", ["join"]), command("b", ["join"]),
+    { ...textStep("join", [], "joined", []), waitFor: ["a", "b"] },
+  ] };
+  await writeFile(workflow, JSON.stringify(definition));
+  const fixture = path.join(temp, "fixture");
+  await mkdir(fixture);
+  await writeFile(path.join(fixture, "join.md"), "joined");
+  const runs = path.join(temp, "runs");
+  run(["run", workflow, "--run-id", "completed", ...opts(runs), "--llm", fixture]);
+  let state = JSON.parse(await readFile(path.join(runs, "completed/state.json"), "utf8"));
+  assert.equal(state.status, "completed", state.error);
+  run(["rerun", "--run-id", "completed", "--from", "join", ...opts(runs)]);
+  state = JSON.parse(await readFile(path.join(runs, "completed/state.json"), "utf8"));
+  assert.equal(state.status, "waiting-input");
+  assert.deepEqual(state.frontier, ["join"]);
+  assert.equal(state.steps.join.attempts, 1);
+  assert.equal(state.rerunFrom, "join");
 });
 
 test("rerun from fanout waits for every fresh branch completion before retrying failed join", async (t) => {
