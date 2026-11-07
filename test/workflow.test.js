@@ -683,6 +683,36 @@ test("failed join continues after upstream completion and rerun --from join runs
   assert.equal(state.steps.after.attempts, 1);
 });
 
+test("rerun from fanout waits for every fresh branch completion before retrying failed join", async (t) => {
+  const temp = await setup();
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const dir = path.join(temp, "wf");
+  await mkdir(dir);
+  await writeFile(path.join(dir, "role.md"), "Respond.");
+  const wf = path.join(dir, "workflow.json");
+  const definition = { id: "fanout-join-rerun", inputs: {}, steps: [
+    command("A", ["B", "C"]), command("B", []), command("C", ["join"]),
+    { ...textStep("join", [], "joined", []), waitFor: ["B", "C"] },
+  ] };
+  await writeFile(wf, JSON.stringify(definition));
+  const runs = path.join(temp, "runs");
+  const fixture = path.join(temp, "fixture");
+  await mkdir(fixture);
+  run(["run", wf, "--run-id", "fanout", ...opts(runs), "--llm", fixture], 1);
+  let state = JSON.parse(await readFile(path.join(runs, "fanout/state.json"), "utf8"));
+  assert.equal(state.steps.join.status, "failed");
+  assert.equal(state.steps.B.attempts, 1);
+  assert.equal(state.steps.C.attempts, 1);
+
+  await writeFile(path.join(fixture, "join.md"), "joined");
+  run(["rerun", "--run-id", "fanout", "--from", "A", ...opts(runs), "--llm", fixture]);
+  state = JSON.parse(await readFile(path.join(runs, "fanout/state.json"), "utf8"));
+  assert.equal(state.status, "completed", state.error);
+  assert.equal(state.steps.B.attempts, 2);
+  assert.equal(state.steps.C.attempts, 2);
+  assert.equal(state.steps.join.attempts, 2);
+});
+
 test("failed join retry keeps the wait baseline from its launch", async (t) => {
   const temp = await setup();
   t.after(() => rm(temp, { recursive: true, force: true }));
@@ -733,9 +763,12 @@ test("rerun clears scheduling state from every step while continue retains it", 
   run(["rerun", "--run-id", "rerun-state", "--from", "target", ...opts(runs), "--llm", fixture]);
   state = JSON.parse(await readFile(statePath, "utf8"));
   assert.equal(state.status, "completed", state.error);
-  for (const id of ["before", "target", "later"]) for (const key of ["pendingSelection", "reactivated", "waitBaseline"]) {
+  for (const id of ["before", "target", "later"]) for (const key of ["pendingSelection", "reactivated"]) {
     assert.equal(Object.hasOwn(state.steps[id], key), false, `${id}.${key}`);
   }
+  assert.equal(Object.hasOwn(state.steps.before, "waitBaseline"), false);
+  assert.equal(Object.hasOwn(state.steps.target, "waitBaseline"), false);
+  assert.equal(state.steps.later.waitBaseline, 5);
 
   state.frontier = ["later"];
   for (const id of ["later"]) Object.assign(state.steps[id], {

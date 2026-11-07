@@ -108,6 +108,11 @@ async function main() {
         delete record.reactivated;
         delete record.waitBaseline;
       }
+      for (const step of loaded.definition.steps) {
+        if (step.id !== start && step.waitFor?.length) {
+          state.steps[step.id].waitBaseline = state.sequence ?? 0;
+        }
+      }
       for (const id of Object.keys(state.rounds)) state.rounds[id] = {};
       state.status = "running";
       delete state.error;
