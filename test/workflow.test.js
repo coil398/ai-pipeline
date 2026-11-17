@@ -746,6 +746,68 @@ test("rerun from a completed join keeps it waiting for fresh upstream completion
   assert.equal(state.rerunFrom, "join");
 });
 
+test("rerun from one branch reuses completed unreachable join inputs and reruns downstream", async (t) => {
+  const temp = await setup();
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const dir = path.join(temp, "wf"); await mkdir(dir);
+  await writeFile(path.join(dir, "role.md"), "Respond.");
+  const workflow = path.join(dir, "workflow.json");
+  const definition = { id: "partial-join-rerun", inputs: {}, steps: [
+    command("start", ["a", "b", "c", "d"]),
+    command("a", ["join"]), command("b", ["join"]), command("c", ["join"]), command("d", ["join"]),
+    { ...textStep("join", [], "joined", ["after"]), waitFor: ["a", "b", "c", "d"] },
+    command("after", []),
+  ] };
+  await writeFile(workflow, JSON.stringify(definition));
+  const runs = path.join(temp, "runs"), fixture = path.join(temp, "fixture"); await mkdir(fixture);
+  await writeFile(path.join(fixture, "join.md"), "joined v1");
+  run(["run", workflow, "--run-id", "partial", ...opts(runs), "--llm", fixture]);
+  let state = JSON.parse(await readFile(path.join(runs, "partial/state.json"), "utf8"));
+  assert.equal(state.status, "completed", state.error);
+  await writeFile(path.join(fixture, "join.md"), "joined v2");
+  run(["rerun", "--run-id", "partial", "--from", "c", ...opts(runs), "--llm", fixture]);
+  state = JSON.parse(await readFile(path.join(runs, "partial/state.json"), "utf8"));
+  assert.equal(state.status, "completed", state.error);
+  assert.equal(state.steps.join.status, "completed");
+  assert.equal(state.steps.join.attempts, 2);
+  assert.equal(state.steps.after.attempts, 2);
+  assert.equal(await readFile(path.join(runs, "partial/steps/join/v2/a1/output.md"), "utf8"), "joined v2");
+});
+
+test("rerun from a branch waits for every reachable join input to complete", async (t) => {
+  const temp = await setup();
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const dir = path.join(temp, "wf"); await mkdir(dir);
+  await writeFile(path.join(dir, "role.md"), "Respond.");
+  const workflow = path.join(dir, "workflow.json");
+  const definition = { id: "reachable-join-inputs", inputs: {}, steps: [
+    command("start", ["c"]), command("c", ["d"]), textStep("d", [], "d-output", ["join"]),
+    { ...textStep("join", [], "joined", []), waitFor: ["c", "d"] },
+  ] };
+  await writeFile(workflow, JSON.stringify(definition));
+  const runs = path.join(temp, "runs"), fixture = path.join(temp, "fixture"); await mkdir(fixture);
+  await writeFile(path.join(fixture, "d.md"), "d v1");
+  await writeFile(path.join(fixture, "join.md"), "joined v1");
+  run(["run", workflow, "--run-id", "reachable", ...opts(runs), "--llm", fixture]);
+  const statePath = path.join(runs, "reachable/state.json");
+  let state = JSON.parse(await readFile(statePath, "utf8"));
+  assert.equal(state.status, "completed", state.error);
+  await rm(path.join(fixture, "d.md"));
+  await rm(path.join(fixture, "join.md"));
+  run(["rerun", "--run-id", "reachable", "--from", "c", ...opts(runs), "--llm", fixture], 1);
+  state = JSON.parse(await readFile(statePath, "utf8"));
+  assert.equal(state.steps.c.status, "completed");
+  assert.equal(state.steps.d.status, "failed");
+  assert.equal(state.steps.join.attempts, 1);
+  assert.equal(state.steps.join.status, "completed");
+  await writeFile(path.join(fixture, "d.md"), "d v2");
+  await writeFile(path.join(fixture, "join.md"), "joined v2");
+  run(["continue", "--run-id", "reachable", ...opts(runs), "--llm", fixture]);
+  state = JSON.parse(await readFile(statePath, "utf8"));
+  assert.equal(state.status, "completed", state.error);
+  assert.equal(state.steps.join.attempts, 2);
+});
+
 test("rerun from fanout waits for every fresh branch completion before retrying failed join", async (t) => {
   const temp = await setup();
   t.after(() => rm(temp, { recursive: true, force: true }));

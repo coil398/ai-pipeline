@@ -23,6 +23,7 @@ export async function schedule(
     for (;;) {
       if (!state.frontier.length) {
         state.status = "completed";
+        delete state.rerunReachable;
         break;
       }
       const batch = [];
@@ -34,9 +35,15 @@ export async function schedule(
         const waitSequence = record.waitBaseline ?? (record.status === "completed"
           ? (record.startedSequence ?? record.completedSequence ?? 0)
           : (record.completedSequence ?? 0));
-        if (!(step.waitFor ?? []).every((source) =>
-          (state.steps[source].completedSequence ?? 0) > waitSequence
-        )) continue;
+        const rerunReachable = state.rerunReachable ? new Set(state.rerunReachable) : null;
+        if (!(step.waitFor ?? []).every((source) => {
+          const completedSequence = state.steps[source].completedSequence;
+          return rerunReachable?.has(source)
+            ? (completedSequence ?? 0) > waitSequence
+            : rerunReachable && completedSequence !== undefined
+              ? true
+              : (completedSequence ?? 0) > waitSequence;
+        })) continue;
         if (step.kind === "decide") {
           if (!batch.length) batch.push(step);
           break;
@@ -54,8 +61,10 @@ export async function schedule(
         state.frontier = state.frontier.filter((id) => {
           if (id === state.rerunFrom) return true;
           const step = definition.steps.find((item) => item.id === id);
+          const rerunReachable = state.rerunReachable ? new Set(state.rerunReachable) : null;
           return !(step?.waitFor?.length && step.waitFor.every((source) =>
-            !state.frontier.includes(source)
+            !state.frontier.includes(source) && (!rerunReachable?.has(source)
+              || (state.steps[source].completedSequence !== undefined))
           ));
         });
         if (!state.frontier.length) continue;

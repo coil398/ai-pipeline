@@ -104,6 +104,20 @@ async function main() {
       state.frontier = [start];
       state.rerunFrom = start;
       state.rerunRequested = true;
+      const reachable = new Set([start]);
+      const pending = [start];
+      while (pending.length) {
+        const id = pending.pop();
+        const step = loaded.definition.steps.find((item) => item.id === id);
+        const index = loaded.definition.steps.indexOf(step);
+        const next = step.kind === "decide"
+          ? [...step.cases.map((item) => item.goto), ...(step.default ? [step.default] : [])]
+          : step.next ?? (loaded.definition.steps[index + 1] ? [loaded.definition.steps[index + 1].id] : []);
+        for (const target of next) if (!reachable.has(target)) { reachable.add(target); pending.push(target); }
+      }
+      state.rerunReachable = loaded.definition.steps.find((step) => step.id === start).waitFor?.length
+        ? loaded.definition.steps.map((step) => step.id)
+        : [...reachable];
       for (const step of loaded.definition.steps) {
         const record = state.steps[step.id];
         delete record.pendingSelection;
